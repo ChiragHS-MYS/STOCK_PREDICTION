@@ -290,7 +290,7 @@ def get_indices_data():
         for name, symbol in index_map.items():
             try:
                 ticker = yf.Ticker(symbol)
-                hist = ticker.history(period='2d')
+                hist = ticker.history(period='2d', timeout=5)  # Add timeout
                 if not hist.empty and len(hist) > 0:
                     price = hist['Close'].iloc[-1]
                     prev_close = hist['Close'].iloc[-2] if len(hist) > 1 else price
@@ -305,27 +305,44 @@ def get_indices_data():
                     if fallback:
                         indices.append(fallback)
             except Exception as idx_error:
-                logger.warning(f"✗ Error fetching {name}: {idx_error}")
+                logger.warning(f"✗ Error fetching {name}: {str(idx_error)[:50]}")
                 # Find fallback for this index
                 fallback = next((item for item in mock_data if item['name'] == name), None)
                 if fallback:
                     indices.append(fallback)
         
-        # If at least some data loaded, return it
-        if len(indices) > 0:
-            logger.info(f"Indices loaded: {success_count} live, {len(indices)-success_count} fallback")
-            return indices
-        else:
-            logger.error("All indices failed, returning full mock data")
-            return mock_data
+        # Always ensure we return all 4 indices (with fallbacks if needed)
+        if len(indices) < 4:
+            for mock_item in mock_data:
+                if not any(idx['name'] == mock_item['name'] for idx in indices):
+                    indices.append(mock_item)
+        
+        logger.info(f"Indices loaded: {success_count} live, {len(indices)-success_count} fallback")
+        return indices
             
     except Exception as e:
-        logger.error(f"Critical error fetching indices: {e}")
+        logger.error(f"Critical error fetching indices: {str(e)[:100]}")
         return mock_data
 
 # ---------- TRENDING STOCKS ---------- #
 def get_trending_stocks():
-    sample = ['INFY', 'TCS', 'RELIANCE', 'HDFCBANK', 'ICICIBANK']
+    # Expanded list of popular stocks from different sectors for better market coverage
+    sample = [
+        # IT & Tech
+        'INFY', 'TCS', 'WIPRO', 'HCLTECH', 'TECHM',
+        # Banking & Finance
+        'HDFCBANK', 'ICICIBANK', 'SBIN', 'AXISBANK', 'KOTAKBANK',
+        # Energy & Materials
+        'RELIANCE', 'ONGC', 'TATASTEEL', 'HINDALCO',
+        # Auto
+        'MARUTI', 'TATAMOTORS', 'M&M',
+        # Pharma
+        'SUNPHARMA', 'DRREDDY', 'CIPLA',
+        # FMCG
+        'HINDUNILVR', 'ITC', 'NESTLEIND',
+        # Others
+        'LT', 'BHARTIARTL', 'ASIANPAINT'
+    ]
     trending = []
     for ticker in sample:
         stock_data = get_stock_data(ticker)
@@ -435,8 +452,28 @@ def api_trending():
 @login_required
 @limiter.limit("100 per hour")
 def api_indices():
-    indices = get_indices_data()
-    return jsonify({'indices': indices})
+    try:
+        indices = get_indices_data()
+        if not indices or len(indices) == 0:
+            # Return mock data if no indices loaded
+            mock_data = [
+                {'name': 'NIFTY 50', 'value': '24,500.00', 'change': 0.5},
+                {'name': 'SENSEX', 'value': '80,500.00', 'change': 0.3},
+                {'name': 'NIFTY BANK', 'value': '52,000.00', 'change': -0.2},
+                {'name': 'INDIA VIX', 'value': '13.50', 'change': 1.2}
+            ]
+            return jsonify({'indices': mock_data})
+        return jsonify({'indices': indices})
+    except Exception as e:
+        logger.error(f"API indices error: {e}")
+        # Return mock data on error
+        mock_data = [
+            {'name': 'NIFTY 50', 'value': '24,500.00', 'change': 0.5},
+            {'name': 'SENSEX', 'value': '80,500.00', 'change': 0.3},
+            {'name': 'NIFTY BANK', 'value': '52,000.00', 'change': -0.2},
+            {'name': 'INDIA VIX', 'value': '13.50', 'change': 1.2}
+        ]
+        return jsonify({'indices': mock_data})
 
 @app.route('/api/watchlist', methods=['GET'])
 def get_watchlist():

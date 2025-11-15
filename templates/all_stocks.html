@@ -626,9 +626,24 @@
       if (sector === 'all') {
         filteredStocks = [...allStocks];
       } else {
-        filteredStocks = allStocks.filter(stock => 
-          stock.sector && stock.sector.toLowerCase().includes(sector)
-        );
+        // Map UI filter names to Yahoo Finance sector names
+        const sectorMap = {
+          'banking': ['financial services', 'financial'],
+          'pharma': ['healthcare'],
+          'auto': ['consumer cyclical', 'auto'],
+          'it': ['technology'],
+          'fmcg': ['consumer defensive', 'consumer staples'],
+          'energy': ['energy'],
+          'realty': ['real estate']
+        };
+        
+        const searchTerms = sectorMap[sector.toLowerCase()] || [sector];
+        
+        filteredStocks = allStocks.filter(stock => {
+          if (!stock.sector) return false;
+          const stockSector = stock.sector.toLowerCase();
+          return searchTerms.some(term => stockSector.includes(term));
+        });
       }
       
       renderStocks(filteredStocks);
