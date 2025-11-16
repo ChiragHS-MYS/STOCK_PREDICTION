@@ -153,23 +153,61 @@
           </div>
           <div id="chart" style="height:500px;"></div>
           <div id="prediction-alert" class="alert mt-3" style="display: none;"></div>
+          
+          <!-- Date Search Section -->
+          <div class="mt-4 p-3" style="background: #f8f9fa; border-radius: 10px;">
+            <h6 class="mb-3"><i class="fas fa-calendar-alt me-2"></i>Search for Specific Date</h6>
+            <div class="input-group mb-3">
+              <input type="date" class="form-control" id="date-search-input" placeholder="Select date">
+              <button class="btn btn-primary" onclick="searchDateData()">
+                <i class="fas fa-search me-2"></i>Search Date
+              </button>
+            </div>
+            <div id="date-search-result" style="display: none;"></div>
+          </div>
         </div>
       </div>
 
       <script>
         const chartData = {{ chart | tojson | safe }};
 
+        // Function to check if a date is a weekend (Saturday=6, Sunday=0)
+        function isWeekend(dateString) {
+          // Parse date string correctly to avoid timezone issues
+          const parts = dateString.split('-');
+          const year = parseInt(parts[0]);
+          const month = parseInt(parts[1]) - 1; // JavaScript months are 0-indexed
+          const day = parseInt(parts[2]);
+          const date = new Date(year, month, day);
+          const dayOfWeek = date.getDay();
+          return dayOfWeek === 6 || dayOfWeek === 0; // Saturday (6) or Sunday (0)
+        }
+
+        // Filter out weekends from chart data
+        const filteredChartData = chartData.filter(d => {
+          // For historical data, only show if there's actual data (not weekends)
+          if (d.Close !== null && d.Close !== undefined) {
+            return !isWeekend(d.Date);
+          }
+          // For predictions, only show trading days
+          if (d.Predicted !== null && d.Predicted !== undefined) {
+            return !isWeekend(d.Date);
+          }
+          // For other data points (MA20, bands), filter weekends
+          return !isWeekend(d.Date);
+        });
+
         // Initialize prediction visibility
         let showPrediction = true;
 
-        // Find last closing price and final predicted price/range
-        const lastClose = chartData.find(d => d.Close !== null && d.Close !== undefined)?.Close;
-        const finalPredictedData = chartData.filter(d => d.Predicted !== null && d.Predicted !== undefined).slice(-1)[0] || {};
+        // Find last closing price and final predicted price/range (use filtered data)
+        const lastClose = filteredChartData.find(d => d.Close !== null && d.Close !== undefined)?.Close;
+        const finalPredictedData = filteredChartData.filter(d => d.Predicted !== null && d.Predicted !== undefined).slice(-1)[0] || {};
         const finalPredicted = finalPredictedData.Predicted;
         const finalPredictedLower = finalPredictedData.PredictedLower;
         const finalPredictedUpper = finalPredictedData.PredictedUpper;
-        const lastHistoricalDate = chartData.find(d => d.Close !== null && d.Close !== undefined)?.Date;
-        const predictionStartDate = chartData.find(d => d.Predicted !== null && d.Predicted !== undefined)?.Date;
+        const lastHistoricalDate = filteredChartData.find(d => d.Close !== null && d.Close !== undefined)?.Date;
+        const predictionStartDate = filteredChartData.find(d => d.Predicted !== null && d.Predicted !== undefined)?.Date;
 
         // Function to update profit/loss alert
         function updatePredictionAlert() {
@@ -220,8 +258,8 @@
           Plotly.newPlot('chart', traces, layout);
         }
 
-        // Prepare OHLC data for candlestick chart
-        const historicalData = chartData.filter(d => d.Close !== null && d.Close !== undefined);
+        // Prepare OHLC data for candlestick chart (weekends already filtered)
+        const historicalData = filteredChartData.filter(d => d.Close !== null && d.Close !== undefined);
         
         const traceCandlestick = {
           x: historicalData.map(d => d.Date),
@@ -237,8 +275,8 @@
         };
 
         const traceMA20 = {
-          x: chartData.map(d => d.Date),
-          y: chartData.map(d => d.MA20),
+          x: filteredChartData.map(d => d.Date),
+          y: filteredChartData.map(d => d.MA20),
           type: 'scatter',
           mode: 'lines',
           name: 'MA20',
@@ -247,8 +285,8 @@
         };
 
         const traceUpper = {
-          x: chartData.map(d => d.Date),
-          y: chartData.map(d => d.Upper),
+          x: filteredChartData.map(d => d.Date),
+          y: filteredChartData.map(d => d.Upper),
           type: 'scatter',
           mode: 'lines',
           name: 'Upper Band',
@@ -257,8 +295,8 @@
         };
 
         const traceLower = {
-          x: chartData.map(d => d.Date),
-          y: chartData.map(d => d.Lower),
+          x: filteredChartData.map(d => d.Date),
+          y: filteredChartData.map(d => d.Lower),
           type: 'scatter',
           mode: 'lines',
           name: 'Lower Band',
@@ -267,19 +305,19 @@
         };
 
         const tracePredicted = {
-          x: chartData.map(d => d.Date),
-          y: chartData.map(d => d.Predicted),
+          x: filteredChartData.map(d => d.Date),
+          y: filteredChartData.map(d => d.Predicted),
           type: 'scatter',
           mode: 'lines',
           name: 'Predicted Price',
           line: { dash: 'dash', color: '#9333ea', width: 3 },
           hovertemplate: 'Predicted: %{y:.2f} INR<br>Range: %{customdata[0]:.2f} - %{customdata[1]:.2f} INR<extra></extra>',
-          customdata: chartData.map(d => [d.PredictedLower, d.PredictedUpper])
+          customdata: filteredChartData.map(d => [d.PredictedLower, d.PredictedUpper])
         };
 
         const tracePredictedBand = {
-          x: chartData.map(d => d.Date).concat(chartData.map(d => d.Date).reverse()),
-          y: chartData.map(d => d.PredictedUpper).concat(chartData.map(d => d.PredictedLower).reverse()),
+          x: filteredChartData.map(d => d.Date).concat(filteredChartData.map(d => d.Date).reverse()),
+          y: filteredChartData.map(d => d.PredictedUpper).concat(filteredChartData.map(d => d.PredictedLower).reverse()),
           type: 'scatter',
           mode: 'none',
           fill: 'toself',
@@ -291,8 +329,8 @@
 
         const tracePredictionStart = {
           x: [predictionStartDate, predictionStartDate],
-          y: [Math.min(...chartData.map(d => d.Lower || d.PredictedLower || Infinity).filter(v => v !== null)), 
-               Math.max(...chartData.map(d => d.Upper || d.PredictedUpper || -Infinity).filter(v => v !== null))],
+          y: [Math.min(...filteredChartData.map(d => d.Lower || d.PredictedLower || Infinity).filter(v => v !== null)), 
+               Math.max(...filteredChartData.map(d => d.Upper || d.PredictedUpper || -Infinity).filter(v => v !== null))],
           type: 'scatter',
           mode: 'lines',
           name: 'Prediction Start',
@@ -303,9 +341,12 @@
         const layout = {
           margin: { t: 30, b: 80 },
           xaxis: { 
-            title: 'Date', 
+            title: 'Date (Trading Days Only)', 
             tickangle: 45,
-            rangeslider: { visible: false }
+            rangeslider: { visible: false },
+            type: 'category',  // Use category type to avoid weekend dates
+            tickmode: 'auto',
+            nticks: 10  // Show reasonable number of date labels
           },
           yaxis: { title: 'Price (INR)' },
           paper_bgcolor: '#ffffff',
@@ -315,7 +356,7 @@
           hovermode: 'x unified',
           dragmode: 'zoom',
           annotations: finalPredicted ? [{
-            x: chartData[chartData.length - 1].Date,
+            x: filteredChartData[filteredChartData.length - 1].Date,
             y: finalPredicted,
             xref: 'x',
             yref: 'y',
@@ -333,6 +374,207 @@
 
         // Initialize alert
         updatePredictionAlert();
+
+        // Function to search for specific date data
+        function searchDateData() {
+          const dateInput = document.getElementById('date-search-input');
+          const resultDiv = document.getElementById('date-search-result');
+          const selectedDate = dateInput.value;
+
+          if (!selectedDate) {
+            resultDiv.innerHTML = '<div class="alert alert-warning">Please select a date first.</div>';
+            resultDiv.style.display = 'block';
+            return;
+          }
+
+          // Parse date correctly to avoid timezone issues
+          // Split the date string and create date in local timezone
+          const [year, month, day] = selectedDate.split('-');
+          const date = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
+          const dayOfWeek = date.getDay();
+          
+          // Day names array
+          const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+          const dayName = dayNames[dayOfWeek];
+          
+          // Check if weekend (Saturday=5, Sunday=0)
+          if (dayOfWeek === 6 || dayOfWeek === 0) { // Saturday or Sunday
+            const weekendName = dayOfWeek === 6 ? 'Saturday' : 'Sunday';
+            resultDiv.innerHTML = `
+              <div class="alert alert-info">
+                <h6><i class="fas fa-info-circle me-2"></i>Market Closed</h6>
+                <p class="mb-0">The selected date (${weekendName}, ${formatDate(selectedDate)}) is a weekend. Stock markets are closed on weekends.</p>
+              </div>
+            `;
+            resultDiv.style.display = 'block';
+            return;
+          }
+
+          // Search in ALL chart data (not filtered) to find any matching date
+          const searchDateStr = formatDate(selectedDate);
+          
+          // First, try to find exact date match in all chart data
+          let foundData = chartData.find(d => {
+            // Try exact match first
+            if (d.Date === searchDateStr) {
+              return true;
+            }
+            // Also try partial match (sometimes dates have different formats)
+            const datePart = d.Date ? d.Date.split(' ')[0] : '';
+            return datePart === searchDateStr;
+          });
+
+          // If not found, check all historical data dates more carefully
+          if (!foundData) {
+            // Search through all historical data (check if date string contains the search date)
+            foundData = chartData.find(d => {
+              if (!d.Date) return false;
+              // Check if the date string contains our search date
+              const dataDate = d.Date.toString().substring(0, 10); // Get first 10 chars (YYYY-MM-DD)
+              return dataDate === searchDateStr;
+            });
+          }
+
+          // If still not found, check the range of available dates
+          if (!foundData) {
+            // Get all dates from chart data
+            const allDates = chartData.map(d => d.Date ? d.Date.toString().substring(0, 10) : null).filter(d => d);
+            const firstDate = allDates.length > 0 ? allDates[0] : null;
+            const lastHistDate = chartData.filter(d => d.Close !== null && d.Close !== undefined)
+                                          .map(d => d.Date ? d.Date.toString().substring(0, 10) : null)
+                                          .filter(d => d)
+                                          .sort()
+                                          .pop();
+            
+            // Parse dates for comparison
+            const searchDateObj = new Date(selectedDate + 'T00:00:00');
+            const firstDateObj = firstDate ? new Date(firstDate + 'T00:00:00') : null;
+            const lastHistDateObj = lastHistDate ? new Date(lastHistDate + 'T00:00:00') : null;
+            
+            // Check if date is before available data range
+            if (firstDateObj && searchDateObj < firstDateObj) {
+              resultDiv.innerHTML = `
+                <div class="alert alert-warning">
+                  <h6><i class="fas fa-calendar-times me-2"></i>No Data Available</h6>
+                  <p class="mb-0">The selected date (${formatDate(selectedDate)}) is before the available data range. Historical data is available from ${firstDate || 'N/A'} onwards.</p>
+                </div>
+              `;
+              resultDiv.style.display = 'block';
+              return;
+            }
+            
+            // Check if it's a future date beyond predictions
+            if (lastHistDateObj && searchDateObj > lastHistDateObj) {
+              // It's a future date - check if it's in predictions
+              const predictionData = chartData.find(d => {
+                if (!d.Date) return false;
+                const dataDate = d.Date.toString().substring(0, 10);
+                return dataDate === searchDateStr && d.Predicted !== null && d.Predicted !== undefined;
+              });
+              
+              if (predictionData) {
+                resultDiv.innerHTML = `
+                  <div class="alert alert-primary">
+                    <h6><i class="fas fa-crystal-ball me-2"></i>Predicted Data for ${formatDate(selectedDate)}</h6>
+                    <div class="row mt-2">
+                      <div class="col-md-6">
+                        <p><strong>Predicted Price:</strong> ₹${predictionData.Predicted.toFixed(2)}</p>
+                        <p><strong>Upper Range:</strong> ₹${predictionData.PredictedUpper.toFixed(2)}</p>
+                        <p><strong>Lower Range:</strong> ₹${predictionData.PredictedLower.toFixed(2)}</p>
+                      </div>
+                    </div>
+                    <small class="text-muted">Note: This is a prediction, not actual market data.</small>
+                  </div>
+                `;
+              } else {
+                resultDiv.innerHTML = `
+                  <div class="alert alert-warning">
+                    <h6><i class="fas fa-calendar-times me-2"></i>No Data Available</h6>
+                    <p class="mb-0">The selected date (${formatDate(selectedDate)}) is beyond the prediction range. Predictions are available for the next 30 trading days only (up to approximately ${lastHistDate ? new Date(new Date(lastHistDate + 'T00:00:00').getTime() + 30*24*60*60*1000).toISOString().substring(0, 10) : 'N/A'}).</p>
+                  </div>
+                `;
+              }
+              resultDiv.style.display = 'block';
+              return;
+            }
+            
+            // Date is within range but no data found (might be a holiday)
+            resultDiv.innerHTML = `
+              <div class="alert alert-warning">
+                <h6><i class="fas fa-calendar-times me-2"></i>No Data Available</h6>
+                <p class="mb-0">No market data available for ${formatDate(selectedDate)} (${dayName}). This might be a market holiday or the date is outside the available data range.</p>
+              </div>
+            `;
+            resultDiv.style.display = 'block';
+            return;
+          }
+
+          // Found historical data
+          if (foundData.Close !== null && foundData.Close !== undefined) {
+            const changeColor = foundData.change >= 0 ? 'success' : 'danger';
+            const changeIcon = foundData.change >= 0 ? 'fa-arrow-up' : 'fa-arrow-down';
+            
+            resultDiv.innerHTML = `
+              <div class="alert alert-success">
+                <h6><i class="fas fa-chart-line me-2"></i>Market Data for ${formatDate(selectedDate)}</h6>
+                <div class="row mt-2">
+                  <div class="col-md-6">
+                    <p><strong>Open Price:</strong> ₹${(foundData.Open || foundData.Close).toFixed(2)}</p>
+                    <p><strong>High Price:</strong> ₹${(foundData.High || foundData.Close).toFixed(2)}</p>
+                    <p><strong>Low Price:</strong> ₹${(foundData.Low || foundData.Close).toFixed(2)}</p>
+                    <p><strong>Close Price:</strong> ₹${foundData.Close.toFixed(2)}</p>
+                  </div>
+                  <div class="col-md-6">
+                    <p><strong>Moving Average (MA20):</strong> ₹${foundData.MA20 ? foundData.MA20.toFixed(2) : 'N/A'}</p>
+                    <p><strong>Upper Band:</strong> ₹${foundData.Upper ? foundData.Upper.toFixed(2) : 'N/A'}</p>
+                    <p><strong>Lower Band:</strong> ₹${foundData.Lower ? foundData.Lower.toFixed(2) : 'N/A'}</p>
+                    ${foundData.change !== undefined ? `
+                      <p><strong>Change:</strong> 
+                        <span class="text-${changeColor}">
+                          <i class="fas ${changeIcon} me-1"></i>
+                          ${foundData.change >= 0 ? '+' : ''}${foundData.change.toFixed(2)}%
+                        </span>
+                      </p>
+                    ` : ''}
+                  </div>
+                </div>
+              </div>
+            `;
+          } else if (foundData.Predicted !== null && foundData.Predicted !== undefined) {
+            // Found prediction data
+            resultDiv.innerHTML = `
+              <div class="alert alert-primary">
+                <h6><i class="fas fa-crystal-ball me-2"></i>Predicted Data for ${formatDate(selectedDate)}</h6>
+                <div class="row mt-2">
+                  <div class="col-md-6">
+                    <p><strong>Predicted Price:</strong> ₹${foundData.Predicted.toFixed(2)}</p>
+                    <p><strong>Upper Range:</strong> ₹${foundData.PredictedUpper.toFixed(2)}</p>
+                    <p><strong>Lower Range:</strong> ₹${foundData.PredictedLower.toFixed(2)}</p>
+                  </div>
+                </div>
+                <small class="text-muted">Note: This is a prediction, not actual market data.</small>
+              </div>
+            `;
+          }
+          
+          resultDiv.style.display = 'block';
+        }
+
+        // Helper function to format date consistently
+        function formatDate(dateString) {
+          const date = new Date(dateString + 'T00:00:00'); // Add time to avoid timezone issues
+          const year = date.getFullYear();
+          const month = String(date.getMonth() + 1).padStart(2, '0');
+          const day = String(date.getDate()).padStart(2, '0');
+          return `${year}-${month}-${day}`;
+        }
+
+        // Allow Enter key to trigger search
+        document.getElementById('date-search-input')?.addEventListener('keypress', function(e) {
+          if (e.key === 'Enter') {
+            searchDateData();
+          }
+        });
       </script>
     {% else %}
       <div class="alert alert-danger text-center">

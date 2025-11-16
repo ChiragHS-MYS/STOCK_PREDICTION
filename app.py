@@ -196,9 +196,20 @@ def get_chart_data(ticker, cache_bust=datetime.now().strftime('%Y%m%d')):
                 std = np.sqrt(mse)
 
                 last_date = pd.to_datetime(hist['Date'].iloc[-1])
-                future_days = np.arange(len(hist), len(hist) + 30).reshape(-1, 1)
-                future_dates = [(last_date + timedelta(days=i)).strftime('%Y-%m-%d') for i in range(1, 31)]
-                predicted_prices = model.predict(future_days)
+                # Generate future dates skipping weekends (only trading days)
+                future_dates = []
+                current_date = last_date
+                trading_days_needed = 30
+                
+                while len(future_dates) < trading_days_needed:
+                    current_date += timedelta(days=1)
+                    # Skip weekends (Saturday=5, Sunday=6)
+                    if current_date.weekday() < 5:  # Monday=0, Friday=4
+                        future_dates.append(current_date.strftime('%Y-%m-%d'))
+                
+                # Create day numbers for prediction (extend from last historical day)
+                future_day_numbers = np.arange(len(hist), len(hist) + len(future_dates)).reshape(-1, 1)
+                predicted_prices = model.predict(future_day_numbers)
                 predicted_upper = predicted_prices + std
                 predicted_lower = predicted_prices - std
 
@@ -217,7 +228,7 @@ def get_chart_data(ticker, cache_bust=datetime.now().strftime('%Y%m%d')):
                         'PredictedUpper': None,
                         'PredictedLower': None
                     })
-                for i in range(30):
+                for i in range(len(future_dates)):
                     data.append({
                         'Date': future_dates[i],
                         'Open': None,
