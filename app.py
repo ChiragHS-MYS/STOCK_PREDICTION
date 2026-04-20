@@ -38,15 +38,9 @@ app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 # Session Security
 
 #MongoDB Configuration
-
-username = "Stockuser"  # Updated to match Atlas
-password = urllib.parse.quote_plus("Anthonyjc@14")  # Ensures @ becomes %40
-cluster_url = "stock-app.nvlvlky.mongodb.net"
-db_name = "Stockuser"  # Verify this matches your Atlas DB name
-
-app.config["MONGO_URI"] = (
-    f"mongodb+srv://{username}:{password}@{cluster_url}/"
-    f"{db_name}?retryWrites=true&w=majority&appName=Stock-app"
+app.config["MONGO_URI"] = os.getenv(
+    "MONGO_URI",
+    "mongodb+srv://chiraghs08_db_user:ChiragYashu%402005@cluster0.pdufrjj.mongodb.net/Stockuser?retryWrites=true&w=majority&appName=Cluster0"
 )
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", os.urandom(24))
 
