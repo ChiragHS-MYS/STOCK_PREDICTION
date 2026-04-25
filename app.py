@@ -38,10 +38,12 @@ app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 # Session Security
 
 #MongoDB Configuration
-app.config["MONGO_URI"] = os.getenv(
-    "MONGO_URI",
-    "mongodb+srv://chiraghs08_db_user:ChiragYashu%402005@cluster0.pdufrjj.mongodb.net/Stockuser?retryWrites=true&w=majority&appName=Cluster0"
-)
+mongo_uri = os.getenv("MONGO_URI")
+
+if not mongo_uri:
+    raise ValueError("MONGO_URI is not set in environment variables")
+
+app.config["MONGO_URI"] = mongo_uri
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", os.urandom(24))
 
 # Initialize MongoDB with TLS/SSL certificate
