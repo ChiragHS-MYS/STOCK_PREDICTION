@@ -1,6 +1,5 @@
 Flask==3.1.2
 flask-cors==6.0.1
-Flask-PyMongo==3.0.1
 Flask-Limiter==4.0.0
 pymongo==4.15.3
 yfinance==0.2.66

@@ -1,7 +1,6 @@
 from flask import Flask, render_template, request, jsonify, redirect, session, url_for
 from flask_cors import CORS
-from flask_pymongo import PyMongo
-import urllib
+from pymongo import MongoClient
 from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
 import yfinance as yf
@@ -20,9 +19,6 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import time
 from bs4 import BeautifulSoup
-from  urllib.parse import quote_plus
-import certifi
-import urllib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
@@ -59,13 +55,13 @@ if not secret_key:
     )
 app.config["SECRET_KEY"] = secret_key
 
-# Initialize MongoDB — PyMongo handles TLS automatically from the connection URI
-mongo = PyMongo(app)
-db = mongo.db  # This will automatically use the database from MONGO_URI
+# Initialize MongoDB directly with MongoClient (bypasses Flask-PyMongo TLS issues on Render)
+client = MongoClient(mongo_uri)
+db = client.get_default_database()
 
 # Test connection
 try:
-    mongo.db.command("ping")
+    client.admin.command("ping")
     print("MongoDB connection successful!")
 except Exception as e:
     print(f"MongoDB connection failed: {e}")
@@ -403,7 +399,7 @@ def watchlist_test():
 @login_required
 def watchlist():
     user = session['user']
-    user_watchlist = mongo.db.watchlists.find_one({'user': user}) or {'tickers': []}
+    user_watchlist = db.watchlists.find_one({'user': user}) or {'tickers': []}
     watchlist_data = get_watchlist_data(user_watchlist.get('tickers', []))
     
     # Force template reload
@@ -419,7 +415,7 @@ def login():
         password = request.form.get('password')
         if not username or not password:
             return render_template('login.html', error="Username and password are required.")
-        user_record = mongo.db.users.find_one({'username': username})
+        user_record = db.users.find_one({'username': username})
         if user_record and check_password_hash(user_record['password'], password):
             session['user'] = username
             return redirect(url_for('home'))
@@ -436,12 +432,12 @@ def signup():
             return render_template('signup.html', error="Username and password are required.")
         if not re.match(r'^[a-zA-Z0-9_]{3,20}$', username):
             return render_template('signup.html', error="Username must be 3-20 characters, alphanumeric or underscore.")
-        existing_user = mongo.db.users.find_one({'username': username})
+        existing_user = db.users.find_one({'username': username})
         if existing_user:
             return render_template('signup.html', error="Username already exists!")
         hashed_pw = generate_password_hash(password, method='pbkdf2:sha256', salt_length=16)
-        mongo.db.users.insert_one({'username': username, 'password': hashed_pw})
-        mongo.db.watchlists.insert_one({'user': username, 'tickers': []})
+        db.users.insert_one({'username': username, 'password': hashed_pw})
+        db.watchlists.insert_one({'user': username, 'tickers': []})
         session['user'] = username
         return redirect(url_for('home'))
     return render_template('signup.html')
@@ -500,7 +496,7 @@ def get_watchlist():
     if 'user' not in session:
         return jsonify({'error': 'Unauthorized'}), 401
     user = session['user']
-    watchlist = mongo.db.watchlists.find_one({'user': user}) or {'tickers': []}
+    watchlist = db.watchlists.find_one({'user': user}) or {'tickers': []}
     return jsonify(get_watchlist_data(watchlist.get('tickers', [])))
 
 @app.route('/api/watchlist/count', methods=['GET'])
@@ -508,7 +504,7 @@ def get_watchlist_count():
     if 'user' not in session:
         return jsonify({'count': 0})
     user = session['user']
-    watchlist = mongo.db.watchlists.find_one({'user': user}) or {'tickers': []}
+    watchlist = db.watchlists.find_one({'user': user}) or {'tickers': []}
     return jsonify({'count': len(watchlist.get('tickers', []))})
 
 @app.route('/api/watchlist/add', methods=['POST'])
@@ -523,7 +519,7 @@ def add_to_watchlist():
     stock_data = get_stock_data(ticker)
     if not stock_data:
         return jsonify({'error': 'Invalid or unavailable ticker.'}), 400
-    mongo.db.watchlists.update_one(
+    db.watchlists.update_one(
         {'user': user},
         {'$addToSet': {'tickers': ticker}},
         upsert=True
@@ -550,7 +546,7 @@ def remove_from_watchlist(ticker):
         print(f'Removing {ticker_upper} from watchlist for {user}')
         
         # Remove from watchlists collection using $pull operator
-        result = mongo.db.watchlists.update_one(
+        result = db.watchlists.update_one(
             {'user': user},
             {'$pull': {'tickers': ticker_upper}}
         )
