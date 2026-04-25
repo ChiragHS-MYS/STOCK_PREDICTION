@@ -41,10 +41,23 @@ app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 mongo_uri = os.getenv("MONGO_URI")
 
 if not mongo_uri:
-    raise ValueError("MONGO_URI is not set in environment variables")
+    raise ValueError(
+        "MONGO_URI is not set in environment variables. "
+        "Please copy .env.example to .env and fill in your MongoDB connection string. "
+        "See README.md for setup instructions."
+    )
 
 app.config["MONGO_URI"] = mongo_uri
-app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", os.urandom(24))
+
+# SECRET_KEY: required for session security
+secret_key = os.getenv("SECRET_KEY")
+if not secret_key:
+    raise ValueError(
+        "SECRET_KEY is not set in environment variables. "
+        "Generate a strong random string and set it as SECRET_KEY. "
+        "See README.md for setup instructions."
+    )
+app.config["SECRET_KEY"] = secret_key
 
 # Initialize MongoDB with TLS/SSL certificate
 mongo = PyMongo(app, tlsCAFile=certifi.where())
