@@ -59,8 +59,8 @@ if not secret_key:
     )
 app.config["SECRET_KEY"] = secret_key
 
-# Initialize MongoDB with TLS/SSL certificate
-mongo = PyMongo(app, tlsCAFile=certifi.where())
+# Initialize MongoDB — PyMongo handles TLS automatically from the connection URI
+mongo = PyMongo(app)
 db = mongo.db  # This will automatically use the database from MONGO_URI
 
 # Test connection
