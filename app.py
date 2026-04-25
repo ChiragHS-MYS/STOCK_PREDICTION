@@ -27,6 +27,11 @@ app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 load_dotenv()
 
+print(f"[STARTUP] Flask app initializing...")
+print(f"[STARTUP] PORT env: {os.getenv('PORT', 'not set')}")
+print(f"[STARTUP] MONGO_URI set: {'yes' if os.getenv('MONGO_URI') else 'no'}")
+print(f"[STARTUP] SECRET_KEY set: {'yes' if os.getenv('SECRET_KEY') else 'no'}")
+
 # Disable template caching for development
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
