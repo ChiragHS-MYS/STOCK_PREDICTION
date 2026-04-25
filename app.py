@@ -68,14 +68,7 @@ db_name = parsed.path.lstrip('/') or os.getenv("MONGO_DB_NAME", "Stockuser")
 if '?' in db_name:
     db_name = db_name.split('?')[0]
 
-# Render-specific TLS fix: allow invalid certificates if env var is set
-# (MongoDB Atlas certs fail validation in Render containers due to missing CA chain)
-mongo_kwargs = {}
-if os.getenv("MONGO_TLS_ALLOW_INVALID", "").lower() in ("true", "1", "yes"):
-    mongo_kwargs["tlsAllowInvalidCertificates"] = True
-    print("[STARTUP] MongoDB TLS certificate validation disabled (MONGO_TLS_ALLOW_INVALID=true)")
-
-client = MongoClient(mongo_uri, **mongo_kwargs)
+client = MongoClient(mongo_uri)
 db = client[db_name]
 print(f"[STARTUP] MongoDB database: {db_name}")
 
