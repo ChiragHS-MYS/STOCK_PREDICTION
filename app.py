@@ -62,7 +62,15 @@ app.config["SECRET_KEY"] = secret_key
 
 # Initialize MongoDB directly with MongoClient (bypasses Flask-PyMongo TLS issues on Render)
 client = MongoClient(mongo_uri)
-db = client.get_default_database()
+
+# Extract database name from URI or env var (get_default_database fails if URI has no db)
+from urllib.parse import urlparse
+parsed = urlparse(mongo_uri)
+db_name = parsed.path.lstrip('/') or os.getenv("MONGO_DB_NAME", "Stockuser")
+if '?' in db_name:
+    db_name = db_name.split('?')[0]
+db = client[db_name]
+print(f"[STARTUP] MongoDB database: {db_name}")
 
 # Test connection
 try:
