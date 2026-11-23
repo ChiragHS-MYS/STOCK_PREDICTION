@@ -107,7 +107,7 @@
                   <i class="fas fa-project-diagram"></i>Sector Correlation
                 </a>
               </li>
-              {% if session.get('user') %}
+              {% if request.session.get('user') %}
                 <li class="nav-item">
                   <a class="nav-link text-white" href="{{ url_for('watchlist') }}">
                     <i class="fas fa-bookmark"></i>Watchlist
@@ -115,7 +115,7 @@
                 </li>
                 <li class="nav-item">
                   <a class="nav-link text-white" href="{{ url_for('logout') }}">
-                    <i class="fas fa-sign-out-alt"></i>Logout ({{ session.get('user') }})
+                    <i class="fas fa-sign-out-alt"></i>Logout ({{ request.session.get('user') }})
                   </a>
                 </li>
               {% else %}

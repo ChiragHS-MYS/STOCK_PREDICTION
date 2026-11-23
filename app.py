@@ -1,56 +1,138 @@
-from flask import Flask, render_template, request, jsonify, redirect, session, url_for
-from flask_cors import CORS
-from pymongo import MongoClient
-from werkzeug.security import generate_password_hash, check_password_hash
-from functools import wraps
-import yfinance as yf
-import pandas as pd
-import numpy as np
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_squared_error
-from functools import lru_cache
-import os
-from dotenv import load_dotenv
-import requests
-from datetime import datetime, timedelta
-import logging
-import re
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
+# ---------- DNS RESOLVER PATCH ---------- #
+# Fallback to public DNS-over-HTTPS (DoH) or hardcoded Yahoo IPs if local system DNS fails.
+import socket
+import urllib.request
+import json
+import threading
 import time
-from bs4 import BeautifulSoup
+
+real_original_getaddrinfo = socket.getaddrinfo
+dns_cache = {}
+dns_lock = threading.Lock()
+DNS_CACHE_TTL = 300 # Cache DNS results for 5 minutes
+
+def resolve_doh(host):
+    try:
+        url = f"https://dns.google/resolve?name={host}&type=A"
+        req = urllib.request.Request(url, headers={"Accept": "application/dns-json"})
+        with urllib.request.urlopen(req, timeout=3.0) as response:
+            data = json.loads(response.read().decode())
+            ips = []
+            if "Answer" in data:
+                for answer in data["Answer"]:
+                    if answer.get("type") == 1: # A record
+                        ips.append(answer["data"])
+            return ips
+    except Exception:
+        try:
+            url = f"https://cloudflare-dns.com/dns-query?name={host}&type=A"
+            req = urllib.request.Request(url, headers={"Accept": "application/dns-json"})
+            with urllib.request.urlopen(req, timeout=3.0) as response:
+                data = json.loads(response.read().decode())
+                ips = []
+                if "Answer" in data:
+                    for answer in data["Answer"]:
+                        if answer.get("type") == 1: # A record
+                            ips.append(answer["data"])
+                return ips
+        except Exception:
+            return []
+
+def patched_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    cache_key = (host, port, family, type, proto, flags)
+    now = time.time()
+    
+    with dns_lock:
+        if cache_key in dns_cache:
+            res, expiry = dns_cache[cache_key]
+            if now < expiry:
+                return res
+
+    try:
+        res = real_original_getaddrinfo(host, port, family, type, proto, flags)
+        with dns_lock:
+            dns_cache[cache_key] = (res, now + DNS_CACHE_TTL)
+        return res
+    except Exception as orig_exc:
+        # If resolution fails for a Yahoo domain, attempt DoH
+        if "yahoo" in host.lower():
+            ips = resolve_doh(host)
+            if ips:
+                res = []
+                for ip in ips:
+                    res.append((socket.AF_INET, socket.SOCK_STREAM, 6, '', (ip, port)))
+                with dns_lock:
+                    dns_cache[cache_key] = (res, now + DNS_CACHE_TTL)
+                return res
+            
+            # Hardcoded backup IPs as a last resort fallback
+            fallback_ips = []
+            if "fc.yahoo.com" in host:
+                fallback_ips = ["180.222.114.11", "106.10.236.37", "180.222.114.12", "106.10.236.40"]
+            elif "yahoo.com" in host:
+                fallback_ips = ["27.123.42.204", "27.123.43.204"]
+                
+            if fallback_ips:
+                res = []
+                for ip in fallback_ips:
+                    res.append((socket.AF_INET, socket.SOCK_STREAM, 6, '', (ip, port)))
+                with dns_lock:
+                    dns_cache[cache_key] = (res, now + DNS_CACHE_TTL)
+                return res
+                
+        raise orig_exc
+
+socket.getaddrinfo = patched_getaddrinfo
+# ---------------------------------------- #
+
+import os
+import re
+import logging
+from datetime import datetime, timedelta
+from functools import wraps, lru_cache
+from urllib.parse import urlparse, unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import requests
+import pandas as pd
+import numpy as np
+from bs4 import BeautifulSoup
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_squared_error
+import pymysql
+from lstm_model import train_and_predict_lstm, compute_weighted_ensemble
+from werkzeug.security import generate_password_hash, check_password_hash
+from dotenv import load_dotenv
 
-# ---------- FLASK APP CONFIG ---------- #
-app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*"}})
+from fastapi import FastAPI, Request, status
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.sessions import SessionMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
 load_dotenv()
 
-print(f"[STARTUP] Flask app initializing...")
+# ---------- FASTAPI APP CONFIG ---------- #
+app = FastAPI(title="Stock Prediction App")
+
+print(f"[STARTUP] FastAPI app initializing...")
 print(f"[STARTUP] PORT env: {os.getenv('PORT', 'not set')}")
-print(f"[STARTUP] MONGO_URI set: {'yes' if os.getenv('MONGO_URI') else 'no'}")
+print(f"[STARTUP] MYSQL_URI set: {'yes' if os.getenv('MYSQL_URI') else 'no'}")
 print(f"[STARTUP] SECRET_KEY set: {'yes' if os.getenv('SECRET_KEY') else 'no'}")
 
-# Disable template caching for development
-app.config['TEMPLATES_AUTO_RELOAD'] = True
-app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
-
-# Session Security
-
-#MongoDB Configuration
-mongo_uri = os.getenv("MONGO_URI")
-
-if not mongo_uri:
+# MySQL Configuration
+mysql_uri = os.getenv("MYSQL_URI")
+if not mysql_uri:
     raise ValueError(
-        "MONGO_URI is not set in environment variables. "
-        "Please copy .env.example to .env and fill in your MongoDB connection string. "
+        "MYSQL_URI is not set in environment variables. "
+        "Please copy .env.example to .env and fill in your MySQL connection string. "
         "See README.md for setup instructions."
     )
 
-app.config["MONGO_URI"] = mongo_uri
-
-# SECRET_KEY: required for session security
 secret_key = os.getenv("SECRET_KEY")
 if not secret_key:
     raise ValueError(
@@ -58,36 +140,72 @@ if not secret_key:
         "Generate a strong random string and set it as SECRET_KEY. "
         "See README.md for setup instructions."
     )
-app.config["SECRET_KEY"] = secret_key
 
-# Initialize MongoDB directly with MongoClient (bypasses Flask-PyMongo TLS issues on Render)
-# Extract database name from URI or env var (get_default_database fails if URI has no db)
-from urllib.parse import urlparse
-parsed = urlparse(mongo_uri)
-db_name = parsed.path.lstrip('/') or os.getenv("MONGO_DB_NAME", "Stockuser")
+# CORS Middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Session Middleware
+app.add_middleware(SessionMiddleware, secret_key=secret_key)
+
+# Rate Limiter Setup
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# MySQL Connection
+parsed = urlparse(mysql_uri)
+db_host = parsed.hostname
+db_port = parsed.port or 3306
+db_user = unquote(parsed.username) if parsed.username else parsed.username
+db_password = unquote(parsed.password) if parsed.password else parsed.password
+db_name = parsed.path.lstrip('/')
 if '?' in db_name:
     db_name = db_name.split('?')[0]
 
-client = MongoClient(mongo_uri)
-db = client[db_name]
-print(f"[STARTUP] MongoDB database: {db_name}")
+def get_db_connection():
+    return pymysql.connect(
+        host=db_host,
+        port=db_port,
+        user=db_user,
+        password=db_password,
+        database=db_name,
+        cursorclass=pymysql.cursors.DictCursor,
+        autocommit=True
+    )
 
-# Test connection
+db_available = False
 try:
-    client.admin.command("ping")
-    print("MongoDB connection successful!")
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                username VARCHAR(255) UNIQUE NOT NULL,
+                password VARCHAR(255) NOT NULL
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS watchlists (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user VARCHAR(255) NOT NULL,
+                ticker VARCHAR(50) NOT NULL,
+                UNIQUE KEY user_ticker (user, ticker)
+            )
+        """)
+    conn.close()
+    print(f"[STARTUP] MySQL database: {db_name}")
+    print("MySQL connection and initialization successful!")
+    db_available = True
 except Exception as e:
-    print(f"MongoDB connection failed: {e}")
+    print(f"MySQL connection/initialization failed: {e}")
 
-
-# Rate limiting setup
-limiter = Limiter(
-    app=app,
-    key_func=get_remote_address,
-    default_limits=["200 per day", "50 per hour"]
-)
-
-# Logging
+# Logging Setup
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] - %(message)s",
@@ -95,46 +213,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Login Required Decorator
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if 'user' not in session:
-            return redirect(url_for('login'))
-        return f(*args, **kwargs)
-    return decorated_function
+# Templates & Static Files
+templates = Jinja2Templates(directory="templates")
+if os.path.exists("css"):
+    app.mount("/css", StaticFiles(directory="css"), name="css")
 
-# Security Headers
-@app.after_request
-def add_security_headers(response):
+# Security Headers & Timing Middleware
+@app.middleware("http")
+async def add_security_headers_and_timing(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    elapsed = time.time() - start_time
+    logger.info(f"{request.method} {request.url.path} completed in {elapsed:.2f}s")
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
     return response
-
-# Request Timing Logs
-@app.before_request
-def log_request_time():
-    request.start_time = time.time()
-
-@app.after_request
-def log_response_time(response):
-    if hasattr(request, "start_time"):
-        elapsed = time.time() - request.start_time
-        logger.info(f"{request.method} {request.path} completed in {elapsed:.2f}s")
-    return response
-
-# Error Handlers
-@app.errorhandler(404)
-def not_found(e):
-    logger.warning(f"404 - Not Found: {request.path}")
-    return render_template("404.html"), 404
-
-@app.errorhandler(500)
-def server_error(e):
-    logger.error(f"500 - Server Error: {str(e)} at {request.path}")
-    return render_template("500.html"), 500
 
 # Retry decorator
 def retry_api(max_attempts=3, delay=2):
@@ -155,34 +250,207 @@ def retry_api(max_attempts=3, delay=2):
     return decorator
 
 # ---------- STOCK DATA ---------- #
-@lru_cache(maxsize=100)
-@retry_api(max_attempts=3, delay=2)
-def get_stock_data(ticker, cache_bust=datetime.now().strftime('%Y%m%d')):
+# ---------- YAHOO FINANCE CUSTOM SESSION & MAPS ---------- #
+yahoo_session = requests.Session()
+yahoo_session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+})
+yahoo_crumb = [None]
+
+def refresh_yahoo_crumb():
     try:
+        logger.info("Initializing Yahoo Finance session cookies...")
+        r1 = yahoo_session.get("https://fc.yahoo.com", timeout=5)
+        logger.info(f"Cookie response code: {r1.status_code}")
+        
+        r2 = yahoo_session.get("https://query2.finance.yahoo.com/v1/test/getcrumb", timeout=5)
+        if r2.status_code == 200:
+            yahoo_crumb[0] = r2.text.strip()
+            logger.info(f"Yahoo Finance crumb initialized: {yahoo_crumb[0]}")
+            return True
+        else:
+            logger.warning(f"Failed to get Yahoo Finance crumb: {r2.status_code}")
+    except Exception as e:
+        logger.error(f"Error refreshing Yahoo Finance crumb: {e}")
+    return False
+
+YAHOO_SECTOR_MAP = {
+    'INFY': 'Technology', 'TCS': 'Technology', 'HCLTECH': 'Technology',
+    'WIPRO': 'Technology', 'TECHM': 'Technology', 'LTIM': 'Technology',
+    'COFORGE': 'Technology', 'MPHASIS': 'Technology', 'PERSISTENT': 'Technology',
+    'HDFCBANK': 'Financial Services', 'ICICIBANK': 'Financial Services',
+    'SBIN': 'Financial Services', 'AXISBANK': 'Financial Services',
+    'KOTAKBANK': 'Financial Services', 'BAJFINANCE': 'Financial Services',
+    'BAJAJFINSV': 'Financial Services', 'HDFCLIFE': 'Financial Services',
+    'ICICIGI': 'Financial Services', 'SBILIFE': 'Financial Services',
+    'PNB': 'Financial Services', 'BANDHANBNK': 'Financial Services',
+    'INDUSINDBK': 'Financial Services', 'YESBANK': 'Financial Services',
+    'RELIANCE': 'Energy', 'ONGC': 'Energy', 'BPCL': 'Energy',
+    'IOC': 'Energy', 'GAIL': 'Utilities', 'COALINDIA': 'Basic Materials',
+    'ADANIGREEN': 'Utilities', 'TATAPOWER': 'Utilities', 'POWERGRID': 'Utilities',
+    'NTPC': 'Utilities',
+    'HINDUNILVR': 'Consumer Defensive', 'ITC': 'Consumer Defensive',
+    'TATACONSUMER': 'Consumer Defensive', 'NESTLEIND': 'Consumer Defensive',
+    'BRITANNIA': 'Consumer Defensive', 'DABUR': 'Consumer Defensive',
+    'GODREJCP': 'Consumer Defensive', 'MARICO': 'Consumer Defensive',
+    'MARUTI': 'Consumer Cyclical', 'TMCV': 'Consumer Cyclical',
+    'M&M': 'Consumer Cyclical', 'BAJAJ-AUTO': 'Consumer Cyclical',
+    'HEROMOTOCO': 'Consumer Cyclical', 'EICHERMOT': 'Consumer Cyclical',
+    'ASHOKLEY': 'Consumer Cyclical', 'TVSMOTOR': 'Consumer Cyclical',
+    'SUNPHARMA': 'Healthcare', 'DRREDDY': 'Healthcare', 'CIPLA': 'Healthcare',
+    'DIVISLAB': 'Healthcare', 'AUROPHARMA': 'Healthcare', 'LUPIN': 'Healthcare',
+    'TORNTPHARM': 'Healthcare', 'BIOCON': 'Healthcare',
+    'JSWSTEEL': 'Basic Materials', 'HINDALCO': 'Basic Materials',
+    'TATASTEEL': 'Basic Materials', 'VEDL': 'Basic Materials',
+    'NATIONALUM': 'Basic Materials', 'SAIL': 'Basic Materials',
+    'LT': 'Industrials', 'ULTRACEMCO': 'Basic Materials', 'GRASIM': 'Basic Materials',
+    'ADANIPORTS': 'Industrials', 'SHREECEM': 'Basic Materials', 'AMBUJACEM': 'Basic Materials',
+    'ACC': 'Basic Materials',
+    'BHARTIARTL': 'Communication Services', 'IDEA': 'Communication Services',
+    'ZOMATO': 'Consumer Cyclical', 'NYKAA': 'Consumer Cyclical', 'DMART': 'Consumer Defensive',
+    'ASIANPAINT': 'Consumer Cyclical', 'PIDILITIND': 'Basic Materials',
+    'BERGER': 'Consumer Cyclical', 'DEEPAKNTR': 'Basic Materials',
+    'PAGEIND': 'Consumer Cyclical', 'ASTRAZEN': 'Healthcare',
+    'DLF': 'Real Estate', 'GODREJPROP': 'Real Estate', 'OBEROIRLTY': 'Real Estate',
+    'HAVELLS': 'Industrials', 'SIEMENS': 'Industrials', 'ABB': 'Industrials',
+    'BOSCHLTD': 'Consumer Cyclical'
+}
+
+# ---------- STOCK DATA ---------- #
+_stock_data_cache = {}
+_chart_data_cache = {}
+
+def get_stock_data(ticker, cache_bust=None):
+    if cache_bust is None:
+        cache_bust = datetime.now().strftime('%Y%m%d')
+    cache_key = (ticker, cache_bust)
+    if cache_key in _stock_data_cache:
+        return _stock_data_cache[cache_key]
+    
+    data = _fetch_stock_data_raw(ticker)
+    if data is not None:
+        _stock_data_cache[cache_key] = data
+    return data
+
+@retry_api(max_attempts=3, delay=2)
+def _fetch_stock_data_raw(ticker):
+    try:
+        if not yahoo_crumb[0]:
+            refresh_yahoo_crumb()
+            
         for suffix in ['.NS', '.BO']:
             yf_ticker = ticker + suffix
-            stock = yf.Ticker(yf_ticker)
-            info = stock.info
-            hist = stock.history(period="1d")
-            if not hist.empty and info.get('symbol') == yf_ticker:
-                price = hist['Close'].iloc[-1]
-                change = ((price - hist['Open'].iloc[-1]) / hist['Open'].iloc[-1]) * 100
+            price = None
+            prev_close = None
+            long_name = ticker
+            high_52 = 'N/A'
+            low_52 = 'N/A'
+            pe = 'N/A'
+            eps = 'N/A'
+            market_cap = 'N/A'
+            dividend_yield = 'N/A'
+            sector = YAHOO_SECTOR_MAP.get(ticker, 'N/A')
+            summary = 'No summary available.'
+            
+            # Step A: Try quoteSummary with crumb
+            if yahoo_crumb[0]:
+                try:
+                    import urllib.parse
+                    escaped_symbol = urllib.parse.quote(yf_ticker)
+                    url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{escaped_symbol}?modules=financialData,quoteType,defaultKeyStatistics,assetProfile,summaryDetail&crumb={yahoo_crumb[0]}"
+                    r = yahoo_session.get(url, timeout=5)
+                    if r.status_code == 200:
+                        res = r.json().get('quoteSummary', {}).get('result', [])
+                        if res:
+                            info = res[0]
+                            financials = info.get('financialData', {})
+                            profile = info.get('assetProfile', {})
+                            stats = info.get('defaultKeyStatistics', {})
+                            detail = info.get('summaryDetail', {})
+                            qtype = info.get('quoteType', {})
+                            
+                            price = financials.get('currentPrice', {}).get('raw') or detail.get('regularMarketPrice', {}).get('raw')
+                            prev_close = detail.get('previousClose', {}).get('raw')
+                            long_name = qtype.get('longName', ticker)
+                            sector = profile.get('sector', sector)
+                            summary = profile.get('longBusinessSummary', summary)[:500]
+                            high_52 = detail.get('fiftyTwoWeekHigh', {}).get('raw', 'N/A')
+                            low_52 = detail.get('fiftyTwoWeekLow', {}).get('raw', 'N/A')
+                            pe = detail.get('trailingPE', {}).get('raw', 'N/A')
+                            eps = stats.get('trailingEps', {}).get('raw', 'N/A')
+                            raw_mc = detail.get('marketCap', {}).get('raw') or financials.get('marketCap', {}).get('raw')
+                            if isinstance(raw_mc, (int, float)) and raw_mc > 0:
+                                if raw_mc >= 1e7:
+                                    market_cap = f"₹{raw_mc / 1e7:,.2f} Cr"
+                                else:
+                                    market_cap = f"₹{raw_mc:,.2f}"
+                            else:
+                                market_cap = 'N/A'
+                            
+                            raw_div = (
+                                detail.get('dividendYield', {}).get('raw')
+                                or detail.get('trailingAnnualDividendYield', {}).get('raw')
+                                or financials.get('dividendYield', {}).get('raw')
+                                or stats.get('trailingAnnualDividendYield', {}).get('raw')
+                            )
+                            div_rate = detail.get('dividendRate', {}).get('raw') or financials.get('dividendRate', {}).get('raw')
+                            
+                            if raw_div is not None and isinstance(raw_div, (int, float)) and raw_div > 0:
+                                pct = raw_div * 100 if raw_div < 0.5 else raw_div
+                                if div_rate and isinstance(div_rate, (int, float)) and div_rate > 0:
+                                    dividend_yield = f"{pct:.2f}% (₹{div_rate:.2f}/share)"
+                                else:
+                                    dividend_yield = f"{pct:.2f}%"
+                            elif div_rate and isinstance(div_rate, (int, float)) and div_rate > 0:
+                                dividend_yield = f"₹{div_rate:.2f}/share"
+                            else:
+                                dividend_yield = "0.00% (No dividend)"
+                except Exception as e:
+                    logger.warning(f"Error fetching quoteSummary for {yf_ticker}: {e}")
+                    
+            # Step B: Fallback to chart endpoint if price is not found
+            if price is None:
+                try:
+                    import urllib.parse
+                    escaped_symbol = urllib.parse.quote(yf_ticker)
+                    url = f"https://query2.finance.yahoo.com/v8/finance/chart/{escaped_symbol}?range=1d&interval=1m"
+                    r = yahoo_session.get(url, timeout=5)
+                    if r.status_code == 200:
+                        res = r.json().get('chart', {}).get('result', [])
+                        if res:
+                            meta = res[0].get('meta', {})
+                            price = meta.get('regularMarketPrice')
+                            prev_close = meta.get('previousClose')
+                            long_name = meta.get('longName', long_name)
+                            high_52 = meta.get('fiftyTwoWeekHigh', high_52)
+                            low_52 = meta.get('fiftyTwoWeekLow', low_52)
+                except Exception as e:
+                    logger.warning(f"Error fetching chart fallback for {yf_ticker}: {e}")
+                    
+            if price is not None:
+                if prev_close is not None and prev_close != 0:
+                    change = ((price - prev_close) / prev_close) * 100
+                else:
+                    change = 0.0
+                    
                 exchange = 'NSE' if suffix == '.NS' else 'BSE'
                 return {
                     'ticker': ticker,
                     'symbol': ticker,
-                    'name': info.get('longName', ticker),
+                    'name': long_name,
                     'price': round(price, 2),
                     'currentPrice': round(price, 2),
                     'change': round(change, 2),
-                    'sector': info.get('sector', 'N/A'),
-                    'summary': info.get('longBusinessSummary', '')[:500],
-                    'high52': info.get('fiftyTwoWeekHigh', 'N/A'),
-                    'low52': info.get('fiftyTwoWeekLow', 'N/A'),
-                    'pe': info.get('trailingPE', 'N/A'),
-                    'eps': info.get('trailingEps', 'N/A'),
-                    'marketCap': info.get('marketCap', 'N/A'),
-                    'dividendYield': info.get('dividendYield', 'N/A'),
+                    'sector': sector,
+                    'summary': summary,
+                    'high52': high_52,
+                    'low52': low_52,
+                    'pe': pe,
+                    'eps': eps,
+                    'marketCap': market_cap,
+                    'dividendYield': dividend_yield,
                     'exchange': exchange
                 }
         return None
@@ -191,76 +459,139 @@ def get_stock_data(ticker, cache_bust=datetime.now().strftime('%Y%m%d')):
         return None
 
 # ---------- CHART DATA ---------- #
-@lru_cache(maxsize=50)
+def get_chart_data(ticker, future_days=30, cache_bust=None):
+    if cache_bust is None:
+        cache_bust = datetime.now().strftime('%Y%m%d')
+    cache_key = (ticker, future_days, cache_bust)
+    if cache_key in _chart_data_cache:
+        return _chart_data_cache[cache_key]
+    
+    data = _fetch_chart_data_raw(ticker, future_days=future_days)
+    if data:
+        _chart_data_cache[cache_key] = data
+    return data
+
 @retry_api(max_attempts=3, delay=2)
-def get_chart_data(ticker, cache_bust=datetime.now().strftime('%Y%m%d')):
+def _fetch_chart_data_raw(ticker, future_days=30):
     try:
+        # Map calendar future_days to trading days & appropriate historical window
+        if future_days <= 7:
+            trading_days_needed = 5
+            history_range = "6mo"
+        elif future_days <= 30:
+            trading_days_needed = 22
+            history_range = "6mo"
+        elif future_days <= 90:
+            trading_days_needed = 65
+            history_range = "1y"
+        else: # 365 days
+            trading_days_needed = 252
+            history_range = "2y"
+
         for suffix in ['.NS', '.BO']:
             yf_ticker = ticker + suffix
-            stock = yf.Ticker(yf_ticker)
-            hist = stock.history(period="6mo")
-            if not hist.empty:
-                hist['MA20'] = hist['Close'].rolling(window=20).mean()
-                hist['Upper'] = hist['MA20'] + 2 * hist['Close'].rolling(window=20).std()
-                hist['Lower'] = hist['MA20'] - 2 * hist['Close'].rolling(window=20).std()
-                hist.reset_index(inplace=True)
-                hist['Date'] = hist['Date'].astype(str)
-
-                hist['Day'] = np.arange(len(hist))
-                X = hist[['Day']].values
-                y = hist['Close'].values
-                model = LinearRegression().fit(X, y)
-                mse = mean_squared_error(y, model.predict(X))
-                std = np.sqrt(mse)
-
-                last_date = pd.to_datetime(hist['Date'].iloc[-1])
-                # Generate future dates skipping weekends (only trading days)
-                future_dates = []
-                current_date = last_date
-                trading_days_needed = 30
-                
-                while len(future_dates) < trading_days_needed:
-                    current_date += timedelta(days=1)
-                    # Skip weekends (Saturday=5, Sunday=6)
-                    if current_date.weekday() < 5:  # Monday=0, Friday=4
-                        future_dates.append(current_date.strftime('%Y-%m-%d'))
-                
-                # Create day numbers for prediction (extend from last historical day)
-                future_day_numbers = np.arange(len(hist), len(hist) + len(future_dates)).reshape(-1, 1)
-                predicted_prices = model.predict(future_day_numbers)
-                predicted_upper = predicted_prices + std
-                predicted_lower = predicted_prices - std
-
-                data = []
-                for _, row in hist.iterrows():
-                    data.append({
-                        'Date': row['Date'],
-                        'Open': round(row['Open'], 2) if 'Open' in row and not pd.isna(row['Open']) else round(row['Close'], 2),
-                        'High': round(row['High'], 2) if 'High' in row and not pd.isna(row['High']) else round(row['Close'], 2),
-                        'Low': round(row['Low'], 2) if 'Low' in row and not pd.isna(row['Low']) else round(row['Close'], 2),
-                        'Close': round(row['Close'], 2),
-                        'MA20': round(row['MA20'], 2) if not pd.isna(row['MA20']) else None,
-                        'Upper': round(row['Upper'], 2) if not pd.isna(row['Upper']) else None,
-                        'Lower': round(row['Lower'], 2) if not pd.isna(row['Lower']) else None,
-                        'Predicted': None,
-                        'PredictedUpper': None,
-                        'PredictedLower': None
+            import urllib.parse
+            escaped_symbol = urllib.parse.quote(yf_ticker)
+            url = f"https://query2.finance.yahoo.com/v8/finance/chart/{escaped_symbol}?range={history_range}&interval=1d"
+            r = yahoo_session.get(url, timeout=5)
+            if r.status_code == 200:
+                res = r.json().get('chart', {}).get('result', [])
+                if res:
+                    timestamps = res[0].get('timestamp', [])
+                    indicators = res[0].get('indicators', {}).get('quote', [{}])[0]
+                    closes = indicators.get('close', [])
+                    opens = indicators.get('open', [])
+                    highs = indicators.get('high', [])
+                    lows = indicators.get('low', [])
+                    
+                    if not timestamps or not closes:
+                        continue
+                        
+                    df = pd.DataFrame({
+                        'Date': pd.to_datetime(timestamps, unit='s'),
+                        'Open': opens,
+                        'High': highs,
+                        'Low': lows,
+                        'Close': closes
                     })
-                for i in range(len(future_dates)):
-                    data.append({
-                        'Date': future_dates[i],
-                        'Open': None,
-                        'High': None,
-                        'Low': None,
-                        'Close': None,
-                        'MA20': None,
-                        'Upper': None,
-                        'Lower': None,
-                        'Predicted': round(predicted_prices[i], 2),
-                        'PredictedUpper': round(predicted_upper[i], 2),
-                        'PredictedLower': round(predicted_lower[i], 2)
-                    })
-                return data
+                    
+                    df.dropna(subset=['Close'], inplace=True)
+                    if df.empty:
+                        continue
+                        
+                    df['MA20'] = df['Close'].rolling(window=20).mean()
+                    df['Upper'] = df['MA20'] + 2 * df['Close'].rolling(window=20).std()
+                    df['Lower'] = df['MA20'] - 2 * df['Close'].rolling(window=20).std()
+                    df.reset_index(inplace=True)
+                    df['Date'] = df['Date'].dt.strftime('%Y-%m-%d')
+                    
+                    df['Day'] = np.arange(len(df))
+                    X = df[['Day']].values
+                    y = df['Close'].values
+                    model = LinearRegression().fit(X, y)
+                    mse = mean_squared_error(y, model.predict(X))
+                    std = np.sqrt(mse)
+                    
+                    last_date = pd.to_datetime(df['Date'].iloc[-1])
+                    future_dates = []
+                    current_date = last_date
+                    
+                    while len(future_dates) < trading_days_needed:
+                        current_date += timedelta(days=1)
+                        if current_date.weekday() < 5:
+                            future_dates.append(current_date.strftime('%Y-%m-%d'))
+                            
+                    future_day_numbers = np.arange(len(df), len(df) + len(future_dates)).reshape(-1, 1)
+                    linear_preds = model.predict(future_day_numbers).flatten()
+                    
+                    # Ensemble with PyTorch LSTM
+                    try:
+                        lstm_res = train_and_predict_lstm(y, future_days=len(future_dates), epochs=20)
+                        ens = compute_weighted_ensemble(
+                            linear_preds=linear_preds.tolist(),
+                            lstm_preds=lstm_res['lstm_predictions'],
+                            linear_std=float(std),
+                            lstm_rmse=float(lstm_res['rmse'])
+                        )
+                        pred_prices = ens['ensemble_predictions']
+                        pred_upper = ens['ensemble_upper']
+                        pred_lower = ens['ensemble_lower']
+                    except Exception as e:
+                        logger.warning(f"LSTM/Ensemble prediction error: {e}, falling back to Linear")
+                        pred_prices = np.round(linear_preds, 2).tolist()
+                        pred_upper = np.round(linear_preds + std, 2).tolist()
+                        pred_lower = np.round(linear_preds - std, 2).tolist()
+                    
+                    data = []
+                    for _, row in df.iterrows():
+                        data.append({
+                            'Date': row['Date'],
+                            'Open': round(row['Open'], 2) if 'Open' in row and not pd.isna(row['Open']) else round(row['Close'], 2),
+                            'High': round(row['High'], 2) if 'High' in row and not pd.isna(row['High']) else round(row['Close'], 2),
+                            'Low': round(row['Low'], 2) if 'Low' in row and not pd.isna(row['Low']) else round(row['Close'], 2),
+                            'Close': round(row['Close'], 2),
+                            'MA20': round(row['MA20'], 2) if not pd.isna(row['MA20']) else None,
+                            'Upper': round(row['Upper'], 2) if not pd.isna(row['Upper']) else None,
+                            'Lower': round(row['Lower'], 2) if not pd.isna(row['Lower']) else None,
+                            'Predicted': None,
+                            'PredictedUpper': None,
+                            'PredictedLower': None
+                        })
+                    for i in range(len(future_dates)):
+                        data.append({
+                            'Date': future_dates[i],
+                            'Open': None,
+                            'High': None,
+                            'Low': None,
+                            'Close': None,
+                            'MA20': None,
+                            'Upper': None,
+                            'Lower': None,
+                            'Predicted': round(pred_prices[i], 2),
+                            'PredictedUpper': round(pred_upper[i], 2),
+                            'PredictedLower': round(pred_lower[i], 2)
+                        })
+                    return data
         return []
     except Exception as e:
         logger.error(f"Error getting chart data: {e}")
@@ -318,29 +649,45 @@ def get_indices_data():
         
         for name, symbol in index_map.items():
             try:
-                ticker = yf.Ticker(symbol)
-                hist = ticker.history(period='2d', timeout=5)  # Add timeout
-                if not hist.empty and len(hist) > 0:
-                    price = hist['Close'].iloc[-1]
-                    prev_close = hist['Close'].iloc[-2] if len(hist) > 1 else price
-                    change = ((price - prev_close) / prev_close) * 100 if prev_close else 0
-                    indices.append({'name': name, 'value': f"{price:,.2f}", 'change': round(change, 2)})
-                    success_count += 1
-                    logger.info(f"✓ Fetched {name}: {price:.2f}")
-                else:
-                    logger.warning(f"✗ No data for {name}, using fallback")
-                    # Find fallback for this index
-                    fallback = next((item for item in mock_data if item['name'] == name), None)
-                    if fallback:
-                        indices.append(fallback)
+                import urllib.parse
+                escaped_symbol = urllib.parse.quote(symbol)
+                url = f"https://query2.finance.yahoo.com/v8/finance/chart/{escaped_symbol}?range=2d&interval=1d"
+                r = yahoo_session.get(url, timeout=5)
+                if r.status_code == 200:
+                    res = r.json().get('chart', {}).get('result', [])
+                    if res:
+                        meta = res[0].get('meta', {})
+                        price = meta.get('regularMarketPrice')
+                        prev_close = meta.get('previousClose')
+                        
+                        timestamps = res[0].get('timestamp', [])
+                        closes = res[0].get('indicators', {}).get('quote', [{}])[0].get('close', [])
+                        valid_data = [(t, c) for t, c in zip(timestamps, closes) if c is not None]
+                        
+                        if price is None and valid_data:
+                            price = valid_data[-1][1]
+                        if prev_close is None and len(valid_data) > 1:
+                            prev_close = valid_data[-2][1]
+                        elif prev_close is None and price is not None:
+                            prev_close = price
+                            
+                        if price is not None:
+                            change = ((price - prev_close) / prev_close) * 100 if prev_close else 0.0
+                            indices.append({'name': name, 'value': f"{price:,.2f}", 'change': round(change, 2)})
+                            success_count += 1
+                            logger.info(f"✓ Fetched {name}: {price:.2f}")
+                            continue
+                            
+                logger.warning(f"✗ No data for {name}, using fallback")
+                fallback = next((item for item in mock_data if item['name'] == name), None)
+                if fallback:
+                    indices.append(fallback)
             except Exception as idx_error:
                 logger.warning(f"✗ Error fetching {name}: {str(idx_error)[:50]}")
-                # Find fallback for this index
                 fallback = next((item for item in mock_data if item['name'] == name), None)
                 if fallback:
                     indices.append(fallback)
         
-        # Always ensure we return all 4 indices (with fallbacks if needed)
         if len(indices) < 4:
             for mock_item in mock_data:
                 if not any(idx['name'] == mock_item['name'] for idx in indices):
@@ -355,281 +702,336 @@ def get_indices_data():
 
 # ---------- TRENDING STOCKS ---------- #
 def get_trending_stocks():
-    # Expanded list of popular stocks from different sectors for better market coverage
     sample = [
-        # IT & Tech
         'INFY', 'TCS', 'WIPRO', 'HCLTECH', 'TECHM',
-        # Banking & Finance
         'HDFCBANK', 'ICICIBANK', 'SBIN', 'AXISBANK', 'KOTAKBANK',
-        # Energy & Materials
         'RELIANCE', 'ONGC', 'TATASTEEL', 'HINDALCO',
-        # Auto
-        'MARUTI', 'TATAMOTORS', 'M&M',
-        # Pharma
+        'MARUTI', 'TMCV', 'M&M',
         'SUNPHARMA', 'DRREDDY', 'CIPLA',
-        # FMCG
         'HINDUNILVR', 'ITC', 'NESTLEIND',
-        # Others
         'LT', 'BHARTIARTL', 'ASIANPAINT'
     ]
     trending = []
-    for ticker in sample:
-        stock_data = get_stock_data(ticker)
-        if stock_data:
-            trending.append({
-                'ticker': ticker,
-                'name': stock_data['name'],
-                'price': stock_data['price'],
-                'change': stock_data['change']
-            })
+    try:
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_ticker = {executor.submit(get_stock_data, ticker): ticker for ticker in sample}
+            for future in as_completed(future_to_ticker, timeout=30):
+                ticker = future_to_ticker[future]
+                try:
+                    stock_data = future.result()
+                    if stock_data:
+                        trending.append({
+                            'ticker': ticker,
+                            'name': stock_data['name'],
+                            'price': stock_data['price'],
+                            'change': stock_data['change']
+                        })
+                except Exception as e:
+                    logger.warning(f"Error fetching trending stock {ticker} in thread pool: {e}")
+    except Exception as e:
+        logger.error(f"Error in trending stocks ThreadPoolExecutor: {e}")
+        
     return trending
 
 # ---------- WATCHLIST HELPERS ---------- #
 def get_watchlist_data(tickers):
     return [stock for ticker in tickers if (stock := get_stock_data(ticker))]
 
-# ---------- ROUTES ---------- #
-@app.route('/')
-@login_required
-def home():
+# ---------- FASTAPI ROUTES ---------- #
+
+@app.get("/", name="home")
+async def home(request: Request):
+    if "user" not in request.session:
+        return RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
     trending = get_trending_stocks()
-    return render_template('index.html', trending=trending, year=datetime.now().year)
+    return templates.TemplateResponse(
+        request=request, name="index.html", context={"trending": trending, "year": datetime.now().year}
+    )
 
+@app.get("/all_stocks", name="all_stocks")
+async def all_stocks(request: Request):
+    if "user" not in request.session:
+        return RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
+    return templates.TemplateResponse(request=request, name="all_stocks.html")
 
-@app.route('/all_stocks')
-@login_required
-def all_stocks():
-    return render_template('all_stocks.html')
+@app.get("/watchlist/test", name="watchlist_test")
+async def watchlist_test(request: Request):
+    if "user" not in request.session:
+        return RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
+    return templates.TemplateResponse(request=request, name="watchlist_new.html")
 
-@app.route('/watchlist/test')
-@login_required
-def watchlist_test():
-    # Force template reload
-    app.jinja_env.cache = {}
-    return render_template('watchlist_new.html')
-
-@app.route('/watchlist')
-@login_required
-def watchlist():
-    user = session['user']
-    user_watchlist = db.watchlists.find_one({'user': user}) or {'tickers': []}
+@app.get("/watchlist", name="watchlist")
+async def watchlist(request: Request):
+    if "user" not in request.session:
+        return RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
+    user = request.session["user"]
+    user_watchlist = {'tickers': []}
+    if db_available:
+        try:
+            conn = get_db_connection()
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT ticker FROM watchlists WHERE user = %s", (user,))
+                rows = cursor.fetchall()
+                user_watchlist['tickers'] = [row['ticker'] for row in rows]
+            conn.close()
+        except Exception as e:
+            logger.error(f"DB error in watchlist: {e}")
     watchlist_data = get_watchlist_data(user_watchlist.get('tickers', []))
-    
-    # Force template reload
-    app.jinja_env.cache = {}
-    
-    return render_template('watchlist.html', watchlist=watchlist_data)
+    return templates.TemplateResponse(
+        request=request, name="watchlist.html", context={"watchlist": watchlist_data}
+    )
 
-@app.route('/login', methods=['GET', 'POST'])
+@app.get("/sector_correlation", name="sector_correlation")
+async def sector_correlation(request: Request):
+    if "user" not in request.session:
+        return RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
+    return templates.TemplateResponse(request=request, name="Sector Correlation.html")
+
+@app.get("/login", name="login")
 @limiter.limit("10 per minute")
-def login():
-    if request.method == 'POST':
-        username = request.form.get('username')
-        password = request.form.get('password')
-        if not username or not password:
-            return render_template('login.html', error="Username and password are required.")
-        user_record = db.users.find_one({'username': username})
-        if user_record and check_password_hash(user_record['password'], password):
-            session['user'] = username
-            return redirect(url_for('home'))
-        return render_template('login.html', error="Invalid username or password.")
-    return render_template('login.html')
+async def login_get(request: Request):
+    return templates.TemplateResponse(request=request, name="login.html")
 
-@app.route('/signup', methods=['GET', 'POST'])
+@app.post("/login")
+@limiter.limit("10 per minute")
+async def login_post(request: Request):
+    form_data = await request.form()
+    username = form_data.get('username')
+    password = form_data.get('password')
+    if not username or not password:
+        return templates.TemplateResponse(request=request, name="login.html", context={"error": "Username and password are required."})
+    try:
+        user_record = None
+        if db_available:
+            conn = get_db_connection()
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
+                user_record = cursor.fetchone()
+            conn.close()
+    except Exception:
+        logger.exception("Unable to access MySQL during login")
+        return templates.TemplateResponse(
+            request=request, name="login.html", context={"error": "The database is unavailable. Please try again later."}, status_code=503
+        )
+    if user_record and check_password_hash(user_record['password'], password):
+        request.session['user'] = username
+        return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
+    return templates.TemplateResponse(request=request, name="login.html", context={"error": "Invalid username or password."})
+
+@app.get("/signup", name="signup")
 @limiter.limit("5 per minute")
-def signup():
-    if request.method == 'POST':
-        username = request.form.get('username')
-        password = request.form.get('password')
-        if not username or not password:
-            return render_template('signup.html', error="Username and password are required.")
-        if not re.match(r'^[a-zA-Z0-9_]{3,20}$', username):
-            return render_template('signup.html', error="Username must be 3-20 characters, alphanumeric or underscore.")
-        existing_user = db.users.find_one({'username': username})
-        if existing_user:
-            return render_template('signup.html', error="Username already exists!")
-        hashed_pw = generate_password_hash(password, method='pbkdf2:sha256', salt_length=16)
-        db.users.insert_one({'username': username, 'password': hashed_pw})
-        db.watchlists.insert_one({'user': username, 'tickers': []})
-        session['user'] = username
-        return redirect(url_for('home'))
-    return render_template('signup.html')
+async def signup_get(request: Request):
+    return templates.TemplateResponse(request=request, name="signup.html")
 
-@app.route('/logout')
-def logout():
-    session.pop('user', None)
-    return redirect(url_for('home'))
+@app.post("/signup")
+@limiter.limit("5 per minute")
+async def signup_post(request: Request):
+    form_data = await request.form()
+    username = form_data.get('username')
+    password = form_data.get('password')
+    if not username or not password:
+        return templates.TemplateResponse(request=request, name="signup.html", context={"error": "Username and password are required."})
+    if not re.match(r'^[a-zA-Z0-9_]{3,20}$', username):
+        return templates.TemplateResponse(request=request, name="signup.html", context={"error": "Username must be 3-20 characters, alphanumeric or underscore."})
+    try:
+        existing_user = None
+        if db_available:
+            conn = get_db_connection()
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
+                existing_user = cursor.fetchone()
+            conn.close()
+    except Exception:
+        logger.exception("Unable to access MySQL during signup")
+        return templates.TemplateResponse(
+            request=request, name="signup.html", context={"error": "The database is unavailable. Please try again later."}, status_code=503
+        )
+    if existing_user:
+        return templates.TemplateResponse(request=request, name="signup.html", context={"error": "Username already exists!"})
+    hashed_pw = generate_password_hash(password, method='pbkdf2:sha256', salt_length=16)
+    try:
+        if not db_available:
+            raise Exception("Database client not connected")
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            cursor.execute("INSERT INTO users (username, password) VALUES (%s, %s)", (username, hashed_pw))
+        conn.close()
+    except Exception:
+        logger.exception("Unable to create user in MySQL")
+        return templates.TemplateResponse(
+            request=request, name="signup.html", context={"error": "The database is unavailable. Please try again later."}, status_code=503
+        )
+    request.session['user'] = username
+    return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
 
-@app.route('/analyze')
-@login_required
-def analyze():
-    ticker = request.args.get('ticker', '').upper()
+@app.get("/logout", name="logout")
+async def logout(request: Request):
+    request.session.pop('user', None)
+    return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
+
+@app.get("/analyze", name="analyze")
+async def analyze(request: Request, ticker: str = ""):
+    if "user" not in request.session:
+        return RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
+    ticker = ticker.upper()
     if not ticker or not re.match(r'^[A-Z0-9]+$', ticker):
-        return render_template('analysis.html', stock=None, chart=[], news=[])
+        return templates.TemplateResponse(request=request, name="analysis.html", context={"stock": None, "chart": [], "news": []})
     data = get_stock_data(ticker)
     chart_data = get_chart_data(ticker)
     news_data = get_news_data(ticker)
-    return render_template('analysis.html', stock=data, chart=chart_data, news=news_data)
+    return templates.TemplateResponse(request=request, name="analysis.html", context={"stock": data, "chart": chart_data, "news": news_data})
 
-@app.route('/api/trending')
-@login_required
+@app.get("/api/trending")
 @limiter.limit("100 per hour")
-def api_trending():
-    return jsonify(get_trending_stocks())
+async def api_trending(request: Request):
+    if "user" not in request.session:
+        return JSONResponse({'error': 'Unauthorized'}, status_code=401)
+    return JSONResponse(get_trending_stocks())
 
-@app.route('/api/indices')
-@login_required
+@app.get("/api/indices")
 @limiter.limit("100 per hour")
-def api_indices():
+async def api_indices(request: Request):
+    if "user" not in request.session:
+        return JSONResponse({'error': 'Unauthorized'}, status_code=401)
     try:
         indices = get_indices_data()
         if not indices or len(indices) == 0:
-            # Return mock data if no indices loaded
             mock_data = [
                 {'name': 'NIFTY 50', 'value': '24,500.00', 'change': 0.5},
                 {'name': 'SENSEX', 'value': '80,500.00', 'change': 0.3},
                 {'name': 'NIFTY BANK', 'value': '52,000.00', 'change': -0.2},
                 {'name': 'INDIA VIX', 'value': '13.50', 'change': 1.2}
             ]
-            return jsonify({'indices': mock_data})
-        return jsonify({'indices': indices})
+            return JSONResponse({'indices': mock_data})
+        return JSONResponse({'indices': indices})
     except Exception as e:
         logger.error(f"API indices error: {e}")
-        # Return mock data on error
         mock_data = [
             {'name': 'NIFTY 50', 'value': '24,500.00', 'change': 0.5},
             {'name': 'SENSEX', 'value': '80,500.00', 'change': 0.3},
             {'name': 'NIFTY BANK', 'value': '52,000.00', 'change': -0.2},
             {'name': 'INDIA VIX', 'value': '13.50', 'change': 1.2}
         ]
-        return jsonify({'indices': mock_data})
+        return JSONResponse({'indices': mock_data})
 
-@app.route('/api/watchlist', methods=['GET'])
-def get_watchlist():
-    if 'user' not in session:
-        return jsonify({'error': 'Unauthorized'}), 401
-    user = session['user']
-    watchlist = db.watchlists.find_one({'user': user}) or {'tickers': []}
-    return jsonify(get_watchlist_data(watchlist.get('tickers', [])))
+@app.get("/api/watchlist")
+async def get_watchlist(request: Request):
+    if 'user' not in request.session:
+        return JSONResponse({'error': 'Unauthorized'}, status_code=401)
+    user = request.session['user']
+    watchlist = {'tickers': []}
+    if db_available:
+        try:
+            conn = get_db_connection()
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT ticker FROM watchlists WHERE user = %s", (user,))
+                rows = cursor.fetchall()
+                watchlist['tickers'] = [row['ticker'] for row in rows]
+            conn.close()
+        except Exception as e:
+            logger.error(f"DB error in get_watchlist_count: {e}")
+    return JSONResponse(get_watchlist_data(watchlist.get('tickers', [])))
 
-@app.route('/api/watchlist/count', methods=['GET'])
-def get_watchlist_count():
-    if 'user' not in session:
-        return jsonify({'count': 0})
-    user = session['user']
-    watchlist = db.watchlists.find_one({'user': user}) or {'tickers': []}
-    return jsonify({'count': len(watchlist.get('tickers', []))})
+@app.get("/api/watchlist/count")
+async def get_watchlist_count(request: Request):
+    if 'user' not in request.session:
+        return JSONResponse({'count': 0})
+    user = request.session['user']
+    watchlist = {'tickers': []}
+    if db_available:
+        try:
+            conn = get_db_connection()
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT ticker FROM watchlists WHERE user = %s", (user,))
+                rows = cursor.fetchall()
+                watchlist['tickers'] = [row['ticker'] for row in rows]
+            conn.close()
+        except Exception as e:
+            logger.error(f"DB error in get_watchlist: {e}")
+    return JSONResponse({'count': len(watchlist.get('tickers', []))})
 
-@app.route('/api/watchlist/add', methods=['POST'])
+@app.post("/api/watchlist/add")
 @limiter.limit("20 per minute")
-def add_to_watchlist():
-    if 'user' not in session:
-        return jsonify({'error': 'Unauthorized'}), 401
-    user = session['user']
-    ticker = request.json.get('ticker', '').upper()
+async def add_to_watchlist(request: Request):
+    if 'user' not in request.session:
+        return JSONResponse({'error': 'Unauthorized'}, status_code=401)
+    user = request.session['user']
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    ticker = body.get('ticker', '').upper()
     if not ticker or not re.match(r'^[A-Z0-9]+$', ticker):
-        return jsonify({'error': 'Invalid ticker format. Use symbols like INFY, TCS.'}), 400
+        return JSONResponse({'error': 'Invalid ticker format. Use symbols like INFY, TCS.'}, status_code=400)
     stock_data = get_stock_data(ticker)
     if not stock_data:
-        return jsonify({'error': 'Invalid or unavailable ticker.'}), 400
-    db.watchlists.update_one(
-        {'user': user},
-        {'$addToSet': {'tickers': ticker}},
-        upsert=True
-    )
-    return jsonify({'status': 'added', 'ticker': ticker})
-# ...existing code...
+        return JSONResponse({'error': 'Invalid or unavailable ticker.'}, status_code=400)
+    if db_available:
+        try:
+            conn = get_db_connection()
+            with conn.cursor() as cursor:
+                cursor.execute("INSERT IGNORE INTO watchlists (user, ticker) VALUES (%s, %s)", (user, ticker))
+            conn.close()
+        except Exception as e:
+            logger.error(f"DB error in add_to_watchlist: {e}")
+    return JSONResponse({'status': 'added', 'ticker': ticker})
 
-@app.route('/api/watchlist/<ticker>', methods=['DELETE'])
-@login_required
+@app.delete("/api/watchlist/{ticker}")
 @limiter.limit("20 per minute")
-def remove_from_watchlist(ticker):
-    """Remove a stock from user's watchlist"""
+async def remove_from_watchlist(request: Request, ticker: str):
     try:
-        # Validate user is logged in
-        if 'user' not in session:
-            return jsonify({'error': 'User not logged in'}), 401
+        if 'user' not in request.session:
+            return JSONResponse({'error': 'User not logged in'}, status_code=401)
         
         if not ticker or ticker.strip() == '':
-            return jsonify({'error': 'Ticker is required'}), 400
+            return JSONResponse({'error': 'Ticker is required'}, status_code=400)
         
-        user = session.get('user')
+        user = request.session.get('user')
         ticker_upper = ticker.upper().strip()
         
         print(f'Removing {ticker_upper} from watchlist for {user}')
         
-        # Remove from watchlists collection using $pull operator
-        result = db.watchlists.update_one(
-            {'user': user},
-            {'$pull': {'tickers': ticker_upper}}
-        )
+        if db_available:
+            conn = get_db_connection()
+            with conn.cursor() as cursor:
+                affected_rows = cursor.execute("DELETE FROM watchlists WHERE user = %s AND ticker = %s", (user, ticker_upper))
+            conn.close()
+            print(f'Update result: modified={affected_rows}')
+            if affected_rows == 0:
+                return JSONResponse({'error': f'Stock {ticker} not found in watchlist'}, status_code=404)
         
-        print(f'Update result: matched={result.matched_count}, modified={result.modified_count}')
-        
-        if result.modified_count == 0:
-            return jsonify({'error': f'Stock {ticker} not found in watchlist'}), 404
-        
-        return jsonify({'success': True, 'message': f'{ticker} removed from watchlist'}), 200
+        return JSONResponse({'success': True, 'message': f'{ticker} removed from watchlist'}, status_code=200)
     
     except Exception as e:
         print(f'Error removing from watchlist: {str(e)}')
-        return jsonify({'error': f'Server error: {str(e)}'}), 500
+        return JSONResponse({'error': f'Server error: {str(e)}'}, status_code=500)
 
-# ...rest of code...
-
-@app.route('/api/stocks')
-@login_required
+@app.get("/api/stocks")
 @limiter.limit("50 per hour")
-def api_all_stocks():
+async def api_all_stocks(request: Request):
+    if 'user' not in request.session:
+        return JSONResponse({'error': 'Unauthorized'}, status_code=401)
     symbols = [
-        # IT & Technology
         'INFY', 'TCS', 'HCLTECH', 'WIPRO', 'TECHM', 'LTIM', 'COFORGE', 'MPHASIS', 'PERSISTENT',
-        
-        # Banking & Financial Services
         'HDFCBANK', 'ICICIBANK', 'SBIN', 'AXISBANK', 'KOTAKBANK', 'BAJFINANCE', 'BAJAJFINSV', 'HDFCLIFE',
         'ICICIGI', 'SBILIFE', 'PNB', 'BANDHANBNK', 'INDUSINDBK', 'YESBANK',
-        
-        # Energy & Oil/Gas
         'RELIANCE', 'ONGC', 'BPCL', 'IOC', 'GAIL', 'COALINDIA', 'ADANIGREEN', 'TATAPOWER', 'POWERGRID', 'NTPC',
-        
-        # Consumer Goods (FMCG)
         'HINDUNILVR', 'ITC', 'TATACONSUMER', 'NESTLEIND', 'BRITANNIA', 'DABUR', 'GODREJCP', 'MARICO',
-        
-        # Automobile
-        'MARUTI', 'TATAMOTORS', 'M&M', 'BAJAJ-AUTO', 'HEROMOTOCO', 'EICHERMOT', 'ASHOKLEY', 'TVSMOTOR',
-        
-        # Pharma & Healthcare
+        'MARUTI', 'TMCV', 'M&M', 'BAJAJ-AUTO', 'HEROMOTOCO', 'EICHERMOT', 'ASHOKLEY', 'TVSMOTOR',
         'SUNPHARMA', 'DRREDDY', 'CIPLA', 'DIVISLAB', 'AUROPHARMA', 'LUPIN', 'TORNTPHARM', 'BIOCON',
-        
-        # Metals & Mining
         'JSWSTEEL', 'HINDALCO', 'TATASTEEL', 'VEDL', 'NATIONALUM', 'SAIL',
-        
-        # Infrastructure & Construction
         'LT', 'ULTRACEMCO', 'GRASIM', 'ADANIPORTS', 'SHREECEM', 'AMBUJACEM', 'ACC',
-        
-        # Telecom & Media
         'BHARTIARTL', 'IDEA',
-        
-        # Retail & E-commerce
         'ZOMATO', 'NYKAA', 'DMART',
-        
-        # Chemicals & Paints
         'ASIANPAINT', 'PIDILITIND', 'BERGER', 'DEEPAKNTR',
-        
-        # Textiles & Apparel
         'PAGEIND', 'ASTRAZEN',
-        
-        # Real Estate
         'DLF', 'GODREJPROP', 'OBEROIRLTY',
-        
-        # Diversified
         'HAVELLS', 'SIEMENS', 'ABB', 'BOSCHLTD'
     ]
     
     stocks = []
     logger.info(f"Starting to fetch {len(symbols)} stocks...")
     
-    # Use thread pool for parallel fetching (speeds up data retrieval)
     try:
         with ThreadPoolExecutor(max_workers=10) as executor:
             future_to_symbol = {executor.submit(get_stock_data, symbol): symbol for symbol in symbols}
@@ -644,6 +1046,7 @@ def api_all_stocks():
                             'name': stock_data['name'],
                             'sector': stock_data['sector'],
                             'currentPrice': stock_data['price'],
+                            'change': stock_data.get('change', 0.0),
                             'peRatio': stock_data['pe']
                         })
                         logger.info(f"✓ Fetched {symbol} - {stock_data['sector']}")
@@ -656,17 +1059,46 @@ def api_all_stocks():
         logger.error(f"Thread pool error: {e}")
     
     logger.info(f"Successfully fetched {len(stocks)} out of {len(symbols)} stocks")
-    return jsonify(stocks)
+    return JSONResponse(stocks)
 
-@app.route('/api/news/<ticker>')
-@login_required
+@app.get("/api/news/{ticker}")
 @limiter.limit("100 per hour")
-def api_news(ticker):
+async def api_news(request: Request, ticker: str):
+    if 'user' not in request.session:
+        return JSONResponse({'error': 'Unauthorized'}, status_code=401)
     ticker = ticker.upper()
     if not ticker or not re.match(r'^[A-Z0-9]+$', ticker):
-        return jsonify({'error': 'Invalid ticker format. Use symbols like INFY, TCS.'}), 400
+        return JSONResponse({'error': 'Invalid ticker format. Use symbols like INFY, TCS.'}, status_code=400)
     articles = get_news_data(ticker)
-    return jsonify(articles)
+    return JSONResponse(articles)
+
+@app.get("/api/chart/{ticker}")
+@limiter.limit("100 per hour")
+async def api_chart_data(request: Request, ticker: str, days: int = 30):
+    if 'user' not in request.session:
+        return JSONResponse({'error': 'Unauthorized'}, status_code=401)
+    ticker = ticker.upper()
+    if not ticker or not re.match(r'^[A-Z0-9]+$', ticker):
+        return JSONResponse({'error': 'Invalid ticker format'}, status_code=400)
+    if days not in [7, 30, 90, 365]:
+        days = 30
+    chart_data = get_chart_data(ticker, future_days=days)
+    return JSONResponse(chart_data)
+
+# Exception Handlers
+@app.exception_handler(404)
+async def not_found_handler(request: Request, exc: Exception):
+    logger.warning(f"404 - Not Found: {request.url.path}")
+    return templates.TemplateResponse(request=request, name="404.html", status_code=404)
+
+@app.exception_handler(500)
+async def server_error_handler(request: Request, exc: Exception):
+    logger.error(f"500 - Server Error: {str(exc)} at {request.url.path}")
+    return templates.TemplateResponse(request=request, name="500.html", status_code=500)
 
 if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0', port=int(os.getenv('PORT', 5003)))
+    import uvicorn
+    host = os.getenv('HOST', '127.0.0.1')
+    port = int(os.getenv('PORT', 5003))
+    print(f"\nServer running! Open your browser at: http://localhost:{port} or http://127.0.0.1:{port}\n")
+    uvicorn.run("app:app", host=host, port=port, reload=True)

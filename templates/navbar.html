@@ -21,9 +21,9 @@
       </ul>
 
       <ul class="navbar-nav">
-        {% if session.get('user') %}
+        {% if request.session.get('user') %}
           <li class="nav-item">
-            <span class="nav-link text-light">Hi, {{ session.get('user') }}</span>
+            <span class="nav-link text-light">Hi, {{ request.session.get('user') }}</span>
           </li>
           <li class="nav-item">
             <a class="nav-link text-danger" href="/logout">Logout</a>

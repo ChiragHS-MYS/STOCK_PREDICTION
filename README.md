@@ -1,6 +1,6 @@
 # STOCK_PREDICTION
 
-A Flask-based web application for Indian stock market analysis, prediction, and watchlist management.
+A FastAPI-based web application for Indian stock market analysis, prediction, and watchlist management.
 
 ## Features
 
@@ -14,7 +14,7 @@ A Flask-based web application for Indian stock market analysis, prediction, and 
 
 ## Tech Stack
 
-- **Backend:** Flask, Flask-PyMongo, Flask-Limiter
+- **Backend:** FastAPI, Uvicorn, SlowAPI
 - **Database:** MongoDB Atlas
 - **ML:** scikit-learn (Linear Regression)
 - **Data:** yfinance, pandas, numpy
@@ -84,14 +84,14 @@ The app will be available at `http://localhost:5003`
    - **Name:** `stock-prediction` (or your preference)
    - **Runtime:** `Python 3`
    - **Build Command:** `pip install -r requirements.txt`
-   - **Start Command:** `gunicorn app:app`
+   - **Start Command:** `uvicorn app:app --host 0.0.0.0 --port $PORT`
 
 4. **Set Environment Variables:**
    In the Render dashboard, go to **Environment** and add:
 
-   | Key | Value |
-   |-----|-------|
-   | `MONGO_URI` | Your MongoDB Atlas connection string |
+   | Key          | Value                                                                         |
+   | ------------ | ----------------------------------------------------------------------------- |
+   | `MONGO_URI`  | Your MongoDB Atlas connection string                                          |
    | `SECRET_KEY` | A strong random string (generate locally with Python `secrets.token_hex(32)`) |
 
 5. **Deploy:**
@@ -121,11 +121,11 @@ STOCK_PREDICTION/
 
 ## Environment Variables Reference
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `MONGO_URI` | Yes | MongoDB connection string |
-| `SECRET_KEY` | Yes | Flask session encryption key |
-| `PORT` | No | Server port (default: 5003) |
+| Variable     | Required | Description                  |
+| ------------ | -------- | ---------------------------- |
+| `MONGO_URI`  | Yes      | MongoDB connection string    |
+| `SECRET_KEY` | Yes      | Flask session encryption key |
+| `PORT`       | No       | Server port (default: 5003)  |
 
 ## Security
 
@@ -133,4 +133,3 @@ STOCK_PREDICTION/
 - Rate limiting enabled on auth and API endpoints
 - Security headers (`X-Frame-Options`, `X-Content-Type-Options`, etc.)
 - MongoDB TLS/SSL certificate verification via `certifi`
-

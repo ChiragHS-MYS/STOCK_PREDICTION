@@ -808,7 +808,7 @@
                   <i class="fas fa-list"></i>All Stocks
                 </a>
               </li>
-              {% if session.get('user') %}
+              {% if request.session.get('user') %}
                 <li class="nav-item">
                   <a class="nav-link text-white" href="{{ url_for('watchlist') }}">
                     <i class="fas fa-bookmark"></i>Watchlist
@@ -816,7 +816,7 @@
                 </li>
                 <li class="nav-item">
                   <a class="nav-link text-white" href="{{ url_for('logout') }}">
-                    <i class="fas fa-sign-out-alt"></i>Logout ({{ session.get('user') }})
+                    <i class="fas fa-sign-out-alt"></i>Logout ({{ request.session.get('user') }})
                   </a>
                 </li>
               {% else %}
@@ -1389,7 +1389,7 @@
     // Create stock card element
     function createStockCard(stock) {
       const isGainer = stock.change >= 0;
-      const isLoggedIn = {{ 'true' if session.get('user') else 'false' }};
+      const isLoggedIn = {{ 'true' if request.session.get('user') else 'false' }};
       
       return `
         <div class="col">

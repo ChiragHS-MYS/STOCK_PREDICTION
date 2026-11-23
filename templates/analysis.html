@@ -118,7 +118,7 @@
               <strong>52 Week High:</strong> ₹{{ stock.high52 | default('N/A') }} 
             </p>
             <p>
-              <strong>Low:</strong> ₹{{ stock.low52 | default('N/A') }}
+              <strong>52 Week Low:</strong> ₹{{ stock.low52 | default('N/A') }}
             </p>
             <p>
               <strong>Market Cap:</strong> ₹{{ stock.marketCap | default('N/A') }} 
@@ -141,15 +141,13 @@
 
       <div class="card shadow border-0">
         <div class="card-header chart-header">
-          <h5 class="mb-0">📊 Candlestick Chart (Last 6 Months with Bollinger Bands & 30-Day Prediction)</h5>
+          <h5 class="mb-0">📊 Candlestick Chart (Last 6 Months & 30-Day Prediction)</h5>
         </div>
         <div class="card-body">
-          <div class="threshold-form">
-            <div class="input-group mb-3">
-              <input type="number" class="form-control" id="threshold-input" placeholder="Enter threshold price (INR)" value="{{ stock.price | default('') }}">
-              <button class="btn btn-primary" onclick="updatePredictionAlert()">Update</button>
-              <button class="btn btn-outline-secondary" onclick="togglePrediction()">Toggle Prediction</button>
-            </div>
+          <div class="d-flex justify-content-end mb-3">
+            <button class="btn btn-outline-primary" onclick="togglePrediction()">
+              <i class="fas fa-eye me-1"></i>Toggle Prediction
+            </button>
           </div>
           <div id="chart" style="height:500px;"></div>
           <div id="prediction-alert" class="alert mt-3" style="display: none;"></div>
@@ -211,11 +209,12 @@
 
         // Function to update profit/loss alert
         function updatePredictionAlert() {
-          const threshold = parseFloat(document.getElementById('threshold-input').value) || lastClose;
+          const currentPrice = lastClose;
           const alertDiv = document.getElementById('prediction-alert');
+          if (!alertDiv) return;
           alertDiv.style.display = 'block';
 
-          if (!finalPredicted || !threshold) {
+          if (!finalPredicted || !currentPrice) {
             alertDiv.className = 'alert alert-warning mt-3';
             alertDiv.innerHTML = `
               <strong>Warning:</strong> Unable to calculate prediction. No valid data available. <br>
@@ -224,38 +223,23 @@
             return;
           }
 
-          const changePercent = ((finalPredicted - threshold) / threshold * 100).toFixed(2);
-          if (finalPredictedLower > threshold) {
-            alertDiv.className = 'alert alert-success mt-3';
-            alertDiv.innerHTML = `
-              <strong>Potential Profit:</strong> Predicted price in 30 days is ₹${finalPredicted.toFixed(2)} 
-              (+${changePercent}%, Range: ₹${finalPredictedLower.toFixed(2)} - ₹${finalPredictedUpper.toFixed(2)}). <br>
-              <small>Note: Predictions are estimates and not financial advice.</small>
-            `;
-          } else if (finalPredictedUpper < threshold) {
-            alertDiv.className = 'alert alert-danger mt-3';
-            alertDiv.innerHTML = `
-              <strong>Potential Loss:</strong> Predicted price in 30 days is ₹${finalPredicted.toFixed(2)} 
-              (${changePercent}%, Range: ₹${finalPredictedLower.toFixed(2)} - ₹${finalPredictedUpper.toFixed(2)}). <br>
-              <small>Note: Predictions are estimates and not financial advice.</small>
-            `;
-          } else {
-            alertDiv.className = 'alert alert-warning mt-3';
-            alertDiv.innerHTML = `
-              <strong>Uncertain Outcome:</strong> Predicted price in 30 days is ₹${finalPredicted.toFixed(2)} 
-              (${changePercent}%, Range: ₹${finalPredictedLower.toFixed(2)} - ₹${finalPredictedUpper.toFixed(2)} crosses threshold ₹${threshold.toFixed(2)}). <br>
-              <small>Note: Predictions are estimates and not financial advice.</small>
-            `;
-          }
+          const changePercent = ((finalPredicted - currentPrice) / currentPrice * 100).toFixed(2);
+          const isProfit = finalPredicted >= currentPrice;
+          alertDiv.className = `alert alert-${isProfit ? 'success' : 'danger'} mt-3`;
+          alertDiv.innerHTML = `
+            <strong>${isProfit ? 'Potential Profit' : 'Potential Loss'}:</strong> Predicted price in 30 days is ₹${finalPredicted.toFixed(2)} 
+            (${isProfit ? '+' : ''}${changePercent}%, Range: ₹${finalPredictedLower.toFixed(2)} - ₹${finalPredictedUpper.toFixed(2)}). Current Price: ₹${currentPrice.toFixed(2)}. <br>
+            <small>Note: Predictions are estimates and not financial advice.</small>
+          `;
         }
 
         // Function to toggle prediction visibility
         function togglePrediction() {
           showPrediction = !showPrediction;
           const traces = showPrediction ? 
-            [traceCandlestick, traceMA20, traceUpper, traceLower, tracePredicted, tracePredictedBand, tracePredictionStart] : 
-            [traceCandlestick, traceMA20, traceUpper, traceLower];
-          Plotly.newPlot('chart', traces, layout);
+            [traceCandlestick, tracePredicted, tracePredictedBand, tracePredictionStart] : 
+            [traceCandlestick];
+          Plotly.newPlot('chart', traces, layout, { responsive: true });
         }
 
         // Prepare OHLC data for candlestick chart (weekends already filtered)
@@ -272,36 +256,6 @@
           increasing: {line: {color: '#26a69a'}, fillcolor: '#26a69a'},
           decreasing: {line: {color: '#ef5350'}, fillcolor: '#ef5350'},
           hoverinfo: 'x+y'
-        };
-
-        const traceMA20 = {
-          x: filteredChartData.map(d => d.Date),
-          y: filteredChartData.map(d => d.MA20),
-          type: 'scatter',
-          mode: 'lines',
-          name: 'MA20',
-          line: { dash: 'dot', color: '#ff9900' },
-          hovertemplate: '%{y:.2f} INR<extra></extra>'
-        };
-
-        const traceUpper = {
-          x: filteredChartData.map(d => d.Date),
-          y: filteredChartData.map(d => d.Upper),
-          type: 'scatter',
-          mode: 'lines',
-          name: 'Upper Band',
-          line: { dash: 'dash', color: '#28a745' },
-          hovertemplate: '%{y:.2f} INR<extra></extra>'
-        };
-
-        const traceLower = {
-          x: filteredChartData.map(d => d.Date),
-          y: filteredChartData.map(d => d.Lower),
-          type: 'scatter',
-          mode: 'lines',
-          name: 'Lower Band',
-          line: { dash: 'dash', color: '#dc3545' },
-          hovertemplate: '%{y:.2f} INR<extra></extra>'
         };
 
         const tracePredicted = {
@@ -329,8 +283,8 @@
 
         const tracePredictionStart = {
           x: [predictionStartDate, predictionStartDate],
-          y: [Math.min(...filteredChartData.map(d => d.Lower || d.PredictedLower || Infinity).filter(v => v !== null)), 
-               Math.max(...filteredChartData.map(d => d.Upper || d.PredictedUpper || -Infinity).filter(v => v !== null))],
+          y: [Math.min(...filteredChartData.map(d => d.Low || d.PredictedLower || Infinity).filter(v => v !== null && isFinite(v))), 
+               Math.max(...filteredChartData.map(d => d.High || d.PredictedUpper || -Infinity).filter(v => v !== null && isFinite(v)))],
           type: 'scatter',
           mode: 'lines',
           name: 'Prediction Start',
@@ -338,15 +292,34 @@
           hoverinfo: 'skip'
         };
 
+        // Generate uniform monthly tick marks so every month appears in sequence without skipping months
+        const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        const tickvals = [];
+        const ticktext = [];
+        const seenMonths = new Set();
+
+        filteredChartData.forEach(d => {
+          if (!d.Date) return;
+          const monthKey = d.Date.substring(0, 7); // 'YYYY-MM'
+          if (!seenMonths.has(monthKey)) {
+            seenMonths.add(monthKey);
+            tickvals.push(d.Date);
+            const [y, m] = monthKey.split('-');
+            const mName = monthNames[parseInt(m, 10) - 1];
+            ticktext.push(`01 ${mName} ${y}`);
+          }
+        });
+
         const layout = {
-          margin: { t: 30, b: 80 },
+          margin: { t: 40, b: 80 },
           xaxis: { 
             title: 'Date (Trading Days Only)', 
             tickangle: 45,
             rangeslider: { visible: false },
             type: 'category',  // Use category type to avoid weekend dates
-            tickmode: 'auto',
-            nticks: 10  // Show reasonable number of date labels
+            tickmode: 'array',
+            tickvals: tickvals,
+            ticktext: ticktext
           },
           yaxis: { title: 'Price (INR)' },
           paper_bgcolor: '#ffffff',
@@ -363,14 +336,14 @@
             text: `Predicted: ₹${finalPredicted.toFixed(2)}<br>Range: ₹${finalPredictedLower.toFixed(2)} - ₹${finalPredictedUpper.toFixed(2)}`,
             showarrow: true,
             arrowhead: 2,
-            ax: -30,
-            ay: -30,
-            bgcolor: 'rgba(147, 51, 234, 0.8)',
-            font: { color: '#ffffff' }
+            ax: -40,
+            ay: 35,
+            bgcolor: 'rgba(147, 51, 234, 0.85)',
+            font: { color: '#ffffff', size: 12 }
           }] : []
         };
 
-        Plotly.newPlot('chart', [traceCandlestick, traceMA20, traceUpper, traceLower, tracePredicted, tracePredictedBand, tracePredictionStart], layout);
+        Plotly.newPlot('chart', [traceCandlestick, tracePredicted, tracePredictedBand, tracePredictionStart], layout, { responsive: true });
 
         // Initialize alert
         updatePredictionAlert();
@@ -475,15 +448,17 @@
               if (predictionData) {
                 resultDiv.innerHTML = `
                   <div class="alert alert-primary">
-                    <h6><i class="fas fa-crystal-ball me-2"></i>Predicted Data for ${formatDate(selectedDate)}</h6>
+                    <h5 class="text-center fw-bold mb-3"><i class="fas fa-crystal-ball me-2"></i>Predicted Data for ${formatDate(selectedDate)}</h5>
                     <div class="row mt-2">
                       <div class="col-md-6">
                         <p><strong>Predicted Price:</strong> ₹${predictionData.Predicted.toFixed(2)}</p>
                         <p><strong>Upper Range:</strong> ₹${predictionData.PredictedUpper.toFixed(2)}</p>
+                      </div>
+                      <div class="col-md-6">
                         <p><strong>Lower Range:</strong> ₹${predictionData.PredictedLower.toFixed(2)}</p>
                       </div>
                     </div>
-                    <small class="text-muted">Note: This is a prediction, not actual market data.</small>
+                    <small class="text-muted d-block text-center mt-2">Note: This is a prediction, not actual market data.</small>
                   </div>
                 `;
               } else {
@@ -511,23 +486,26 @@
 
           // Found historical data
           if (foundData.Close !== null && foundData.Close !== undefined) {
-            const changeColor = foundData.change >= 0 ? 'success' : 'danger';
-            const changeIcon = foundData.change >= 0 ? 'fa-arrow-up' : 'fa-arrow-down';
+            const changeColor = (foundData.change || 0) >= 0 ? 'success' : 'danger';
+            const changeIcon = (foundData.change || 0) >= 0 ? 'fa-arrow-up' : 'fa-arrow-down';
+            
+            // Check if selected date is today (or matches the latest session date)
+            const now = new Date();
+            const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+            const isToday = (searchDateStr === todayStr || searchDateStr === lastHistoricalDate);
+            const priceLabel = isToday ? 'Current Price (LTP)' : 'Close Price';
             
             resultDiv.innerHTML = `
               <div class="alert alert-success">
-                <h6><i class="fas fa-chart-line me-2"></i>Market Data for ${formatDate(selectedDate)}</h6>
+                <h5 class="text-center fw-bold mb-3"><i class="fas fa-chart-line me-2"></i>Market Data for ${formatDate(selectedDate)}</h5>
                 <div class="row mt-2">
                   <div class="col-md-6">
                     <p><strong>Open Price:</strong> ₹${(foundData.Open || foundData.Close).toFixed(2)}</p>
                     <p><strong>High Price:</strong> ₹${(foundData.High || foundData.Close).toFixed(2)}</p>
-                    <p><strong>Low Price:</strong> ₹${(foundData.Low || foundData.Close).toFixed(2)}</p>
-                    <p><strong>Close Price:</strong> ₹${foundData.Close.toFixed(2)}</p>
                   </div>
                   <div class="col-md-6">
-                    <p><strong>Moving Average (MA20):</strong> ₹${foundData.MA20 ? foundData.MA20.toFixed(2) : 'N/A'}</p>
-                    <p><strong>Upper Band:</strong> ₹${foundData.Upper ? foundData.Upper.toFixed(2) : 'N/A'}</p>
-                    <p><strong>Lower Band:</strong> ₹${foundData.Lower ? foundData.Lower.toFixed(2) : 'N/A'}</p>
+                    <p><strong>Low Price:</strong> ₹${(foundData.Low || foundData.Close).toFixed(2)}</p>
+                    <p><strong>${priceLabel}:</strong> ₹${foundData.Close.toFixed(2)}</p>
                     ${foundData.change !== undefined ? `
                       <p><strong>Change:</strong> 
                         <span class="text-${changeColor}">
@@ -544,15 +522,17 @@
             // Found prediction data
             resultDiv.innerHTML = `
               <div class="alert alert-primary">
-                <h6><i class="fas fa-crystal-ball me-2"></i>Predicted Data for ${formatDate(selectedDate)}</h6>
+                <h5 class="text-center fw-bold mb-3"><i class="fas fa-crystal-ball me-2"></i>Predicted Data for ${formatDate(selectedDate)}</h5>
                 <div class="row mt-2">
                   <div class="col-md-6">
                     <p><strong>Predicted Price:</strong> ₹${foundData.Predicted.toFixed(2)}</p>
                     <p><strong>Upper Range:</strong> ₹${foundData.PredictedUpper.toFixed(2)}</p>
+                  </div>
+                  <div class="col-md-6">
                     <p><strong>Lower Range:</strong> ₹${foundData.PredictedLower.toFixed(2)}</p>
                   </div>
                 </div>
-                <small class="text-muted">Note: This is a prediction, not actual market data.</small>
+                <small class="text-muted d-block text-center mt-2">Note: This is a prediction, not actual market data.</small>
               </div>
             `;
           }
